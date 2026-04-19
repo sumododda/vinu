@@ -48,28 +48,35 @@ export class WhisperModelManager {
     if (!res.ok) throw new Error(`Model download failed: ${res.status}`);
     if (!res.body) throw new Error('Model download produced no body');
 
-    await new Promise<void>(async (resolve, reject) => {
-      const out = createWriteStream(tmp);
-      let bytes = 0;
-      try {
-        for await (const chunk of res.body as unknown as AsyncIterable<Buffer>) {
-          bytes += chunk.length;
-          if (!out.write(chunk)) await new Promise((r) => out.once('drain', r));
-          this.onProgress?.(key, bytes);
-        }
-        out.end(resolve);
-      } catch (err) {
-        out.destroy();
-        reject(err);
-      }
-    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const out = createWriteStream(tmp);
+        out.on('error', reject);
+        let bytes = 0;
+        (async () => {
+          try {
+            for await (const chunk of res.body as unknown as AsyncIterable<Buffer>) {
+              bytes += chunk.length;
+              if (!out.write(chunk)) await new Promise((r) => out.once('drain', r));
+              this.onProgress?.(key, bytes);
+            }
+            out.end(() => resolve());
+          } catch (err) {
+            out.destroy();
+            reject(err);
+          }
+        })();
+      });
 
-    const got = await fileSha256(tmp);
-    if (got !== entry.sha256) {
+      const got = await fileSha256(tmp);
+      if (got !== entry.sha256) {
+        throw new Error(`sha256 mismatch for ${key}: expected ${entry.sha256}, got ${got}`);
+      }
+      await rename(tmp, dest);
+    } catch (err) {
       await unlink(tmp).catch(() => {});
-      throw new Error(`sha256 mismatch for ${key}: expected ${entry.sha256}, got ${got}`);
+      throw err;
     }
-    await rename(tmp, dest);
   }
 }
 
