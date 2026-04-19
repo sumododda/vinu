@@ -1,5 +1,4 @@
-import type { Note, NoteSummary, NoteStatus } from '../main/db/store';
-import type { Settings } from '../main/settings';
+import type { Note, NoteSummary, NoteStatus, Settings } from './types';
 
 export const IpcChannels = {
   AppPing: 'app:ping',

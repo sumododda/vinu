@@ -1,17 +1,8 @@
 import type Database from 'better-sqlite3';
 import type { safeStorage as ElectronSafeStorage } from 'electron';
+import type { Provider, Settings } from '@shared/types';
 
-export type Provider = 'anthropic' | 'openrouter' | 'custom';
-
-export interface Settings {
-  provider: Provider;
-  apiKey: string;
-  baseUrl: string;
-  model: string;
-  hotkeyEnabled: boolean;
-  hotkeyAccelerator: string;
-  keepAudioDefault: boolean;
-}
+export type { Provider, Settings };
 
 const DEFAULTS: Settings = {
   provider: 'anthropic',

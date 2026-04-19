@@ -1,30 +1,7 @@
 import type Database from 'better-sqlite3';
+import type { Note, NoteStatus, NoteSummary } from '@shared/types';
 
-export type NoteStatus =
-  | 'transcribing'
-  | 'generating'
-  | 'ready'
-  | 'transcription_failed'
-  | 'generation_failed'
-  | 'pending_network';
-
-export interface NoteSummary {
-  id: string;
-  createdAt: number;
-  updatedAt: number;
-  title: string;
-  status: NoteStatus;
-  durationMs: number;
-}
-
-export interface Note extends NoteSummary {
-  markdown: string;
-  transcript: string;
-  audioPath: string | null;
-  errorMessage: string | null;
-  modelUsed: string | null;
-  provider: string | null;
-}
+export type { Note, NoteStatus, NoteSummary };
 
 interface NoteRow {
   id: string;
