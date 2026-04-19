@@ -1,10 +1,10 @@
 ---
-title: Voice Notes — Design Spec
+title: vinu — Design Spec
 date: 2026-04-19
 status: draft
 ---
 
-# Voice Notes — Design Spec
+# vinu — Design Spec
 
 ## Summary
 
@@ -301,7 +301,7 @@ Coverage target: 80% on main-process services, 60% on renderer. Enforced per-PR.
 ```
 /
 ├── docs/superpowers/specs/
-│   └── 2026-04-19-voice-notes-app-design.md
+│   └── 2026-04-19-vinu-design.md
 ├── src/
 │   ├── main/
 │   │   ├── index.ts                 # app bootstrap, window, IPC wiring
