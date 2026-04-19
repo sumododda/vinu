@@ -1,0 +1,17 @@
+node_modules/
+out/
+dist/
+release/
+.vite/
+.DS_Store
+*.log
+userData/
+resources/bin/
+resources/models/
+.env
+.env.local
+.vscode/
+.idea/
+coverage/
+playwright-report/
+test-results/
