@@ -6,7 +6,7 @@ CREATE TABLE notes (
   markdown      TEXT NOT NULL DEFAULT '',
   transcript    TEXT NOT NULL DEFAULT '',
   audio_path    TEXT,
-  duration_ms   INTEGER,
+  duration_ms   INTEGER NOT NULL DEFAULT 0,
   status        TEXT NOT NULL CHECK (status IN (
                   'transcribing','generating','ready',
                   'transcription_failed','generation_failed','pending_network')),
