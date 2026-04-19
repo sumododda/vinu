@@ -1,6 +1,3 @@
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
-
 CREATE TABLE notes (
   id            TEXT PRIMARY KEY,
   created_at    INTEGER NOT NULL,
@@ -9,7 +6,7 @@ CREATE TABLE notes (
   markdown      TEXT NOT NULL DEFAULT '',
   transcript    TEXT NOT NULL DEFAULT '',
   audio_path    TEXT,
-  duration_ms   INTEGER NOT NULL DEFAULT 0,
+  duration_ms   INTEGER,
   status        TEXT NOT NULL CHECK (status IN (
                   'transcribing','generating','ready',
                   'transcription_failed','generation_failed','pending_network')),
