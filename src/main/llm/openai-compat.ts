@@ -21,6 +21,11 @@ export class OpenAICompatClient implements LLMClient {
   private readonly sdk: OpenAiLike;
 
   constructor(private readonly config: LLMConfig, sdk?: OpenAiLike) {
+    if (!sdk && !config.baseUrl) {
+      // No safe default — without an explicit baseUrl the SDK would route to
+      // api.openai.com, which could leak a non-OpenAI key to OpenAI.
+      throw new Error('OpenAICompatClient requires config.baseUrl');
+    }
     this.sdk =
       sdk ??
       (new OpenAI({
