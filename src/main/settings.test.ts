@@ -65,4 +65,11 @@ describe('SettingsStore', () => {
     store.write({ ...store.read(), apiKey: 'sk-plain' });
     expect(store.read().apiKey).toBe('sk-plain');
   });
+
+  it('falls back to defaults when a settings row is corrupt', () => {
+    const db = freshDb();
+    db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('provider', 'not-json{');
+    const store = new SettingsStore(db, fakeSafeStorage as any);
+    expect(store.read().provider).toBe('anthropic');
+  });
 });

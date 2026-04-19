@@ -46,7 +46,12 @@ export class SettingsStore {
 
     const get = <K extends keyof Settings>(key: K): Settings[K] | undefined => {
       const raw = map.get(key);
-      return raw === undefined ? undefined : (JSON.parse(raw) as Settings[K]);
+      if (raw === undefined) return undefined;
+      try {
+        return JSON.parse(raw) as Settings[K];
+      } catch {
+        return undefined;
+      }
     };
 
     let apiKey = '';
