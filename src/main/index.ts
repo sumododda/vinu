@@ -55,7 +55,7 @@ app.whenReady().then(() => {
     });
   });
 
-  ipcMain.handle(IpcChannels.Ping, () => 'pong' as const);
+  ipcMain.handle(IpcChannels.AppPing, () => 'pong' as const);
 
   createMainWindow();
 

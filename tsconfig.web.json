@@ -16,5 +16,5 @@
       "@shared/*": ["./src/shared/*"]
     }
   },
-  "include": ["src/renderer/**/*", "src/shared/**/*"]
+  "include": ["src/renderer/**/*", "src/shared/**/*", "src/main/db/store.ts", "src/main/settings.ts"]
 }
