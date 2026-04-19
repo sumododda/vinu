@@ -4,6 +4,24 @@ import { IpcChannels } from '@shared/ipc';
 
 const isDev = !app.isPackaged;
 
+const cspProd =
+  "default-src 'self'; " +
+  "script-src 'self'; " +
+  "style-src 'self' 'unsafe-inline'; " +
+  "connect-src 'self' https:; " +
+  "img-src 'self' data: blob:; " +
+  "media-src 'self' blob:; " +
+  "font-src 'self' data:;";
+
+const cspDev =
+  "default-src 'self'; " +
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval'; " +
+  "style-src 'self' 'unsafe-inline'; " +
+  "connect-src 'self' https: ws: http://localhost:* ws://localhost:*; " +
+  "img-src 'self' data: blob:; " +
+  "media-src 'self' blob:; " +
+  "font-src 'self' data:;";
+
 function createMainWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 1100,
@@ -32,9 +50,7 @@ app.whenReady().then(() => {
     cb({
       responseHeaders: {
         ...details.responseHeaders,
-        'Content-Security-Policy': [
-          "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https:; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:;",
-        ],
+        'Content-Security-Policy': [isDev ? cspDev : cspProd],
       },
     });
   });
