@@ -53,7 +53,13 @@ export class WhisperRunner {
 }
 
 function parseWhisperJson(raw: string): TranscriptResult {
-  const data = JSON.parse(raw) as WhisperJson;
+  let data: WhisperJson;
+  try {
+    data = JSON.parse(raw) as WhisperJson;
+  } catch {
+    const snippet = raw.slice(0, 200);
+    throw new Error(`whisper output was not valid JSON: ${snippet}`);
+  }
   const segments: TranscriptSegment[] = data.transcription.map((s) => ({
     startMs: s.offsets.from,
     endMs: s.offsets.to,
