@@ -1,0 +1,3975 @@
+# Voice Notes App — Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Build a cross-platform Electron desktop app that records audio, transcribes locally with whisper.cpp, and turns the transcript into readable structured notes via a configurable cloud LLM (Anthropic / OpenRouter / custom OpenAI-compatible).
+
+**Architecture:** Electron main process owns all I/O (sidecars, SQLite, HTTPS to LLM). Sandboxed renderer (React + TS) handles UI and mic capture only, communicating via a typed IPC preload bridge. Whisper.cpp + ffmpeg ship as per-OS sidecar binaries; models download on first run.
+
+**Tech Stack:** Electron · React + TypeScript · Vite via `electron-vite` · `electron-builder` packaging · `better-sqlite3` (FTS5) · `@anthropic-ai/sdk` · `openai` SDK · whisper.cpp + ffmpeg sidecars · Vitest + Playwright for testing.
+
+**Spec:** [docs/superpowers/specs/2026-04-19-voice-notes-app-design.md](../specs/2026-04-19-voice-notes-app-design.md)
+
+---
+
+## Conventions
+
+- All work happens at the repo root: `/Users/sumo/agent-notes`.
+- Commits: Conventional Commits style (`feat:`, `test:`, `chore:`, `fix:`).
+- After each task's final commit, run `npm run typecheck && npm test` once before moving on.
+- Use `pnpm` if available; fall back to `npm`. Commands below show `npm`.
+- Whenever a step says "verify against current docs", use the Context7 MCP server to confirm the API shape hasn't changed; do not silently use a deprecated form.
+- For subprocess invocation we use Node's `child_process.spawn` directly (NOT the shell-based `exec`). All sidecar arguments are passed as a typed array, never interpolated into a shell string.
+
+---
+
+## Task 1: Initialize project scaffolding
+
+**Files:**
+- Create: `package.json`
+- Create: `tsconfig.json`
+- Create: `tsconfig.node.json`
+- Create: `tsconfig.web.json`
+- Create: `electron.vite.config.ts`
+- Create: `.gitignore`
+- Create: `.editorconfig`
+- Create: `vitest.config.ts`
+
+- [ ] **Step 1: Create `.gitignore`**
+
+```
+node_modules/
+out/
+dist/
+release/
+.vite/
+.DS_Store
+*.log
+userData/
+resources/bin/
+resources/models/
+.env
+.env.local
+.vscode/
+.idea/
+coverage/
+playwright-report/
+test-results/
+```
+
+- [ ] **Step 2: Create `.editorconfig`**
+
+```
+root = true
+[*]
+indent_style = space
+indent_size = 2
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+```
+
+- [ ] **Step 3: Create `package.json`**
+
+Use the most current stable versions. Verify each library's latest stable release via Context7 before pinning.
+
+```json
+{
+  "name": "voice-notes",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Voice-driven notetaking with local Whisper + cloud LLM",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
+    "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "package": "electron-vite build && electron-builder",
+    "package:mac": "electron-vite build && electron-builder --mac",
+    "package:win": "electron-vite build && electron-builder --win",
+    "package:linux": "electron-vite build && electron-builder --linux",
+    "fetch:sidecars": "node scripts/fetch-sidecars.mjs",
+    "postinstall": "electron-builder install-app-deps && npm run fetch:sidecars",
+    "e2e": "playwright test"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "latest",
+    "openai": "latest",
+    "better-sqlite3": "latest",
+    "uuid": "latest"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "latest",
+    "@playwright/test": "latest",
+    "@types/better-sqlite3": "latest",
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@types/uuid": "latest",
+    "@vitejs/plugin-react": "latest",
+    "electron": "latest",
+    "electron-builder": "latest",
+    "electron-vite": "latest",
+    "eslint": "latest",
+    "playwright": "latest",
+    "prettier": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "typescript": "latest",
+    "vite": "latest",
+    "vitest": "latest"
+  }
+}
+```
+
+After writing, replace each `"latest"` by running `npm install` and then pinning the resolved versions back into `package.json` with `^x.y.z` ranges. Do not commit `"latest"` literals.
+
+- [ ] **Step 4: Create `tsconfig.json` (root, references)**
+
+```json
+{
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.node.json" },
+    { "path": "./tsconfig.web.json" }
+  ]
+}
+```
+
+- [ ] **Step 5: Create `tsconfig.node.json` (main + preload)**
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "types": ["node", "electron-vite/node"],
+    "outDir": "out/types/node",
+    "composite": true
+  },
+  "include": ["src/main/**/*", "src/preload/**/*", "src/shared/**/*", "scripts/**/*"]
+}
+```
+
+- [ ] **Step 6: Create `tsconfig.web.json` (renderer)**
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "outDir": "out/types/web",
+    "composite": true
+  },
+  "include": ["src/renderer/**/*", "src/shared/**/*"]
+}
+```
+
+- [ ] **Step 7: Create `electron.vite.config.ts`**
+
+```ts
+import { defineConfig, externalizeDepsPlugin } from 'electron-vite';
+import { resolve } from 'path';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig({
+  main: {
+    plugins: [externalizeDepsPlugin()],
+    build: {
+      outDir: 'out/main',
+      rollupOptions: { input: { index: resolve(__dirname, 'src/main/index.ts') } },
+    },
+    resolve: {
+      alias: { '@shared': resolve(__dirname, 'src/shared') },
+    },
+  },
+  preload: {
+    plugins: [externalizeDepsPlugin()],
+    build: {
+      outDir: 'out/preload',
+      rollupOptions: { input: { index: resolve(__dirname, 'src/preload/index.ts') } },
+    },
+    resolve: {
+      alias: { '@shared': resolve(__dirname, 'src/shared') },
+    },
+  },
+  renderer: {
+    root: 'src/renderer',
+    plugins: [react()],
+    build: {
+      outDir: 'out/renderer',
+      rollupOptions: { input: { index: resolve(__dirname, 'src/renderer/index.html') } },
+    },
+    resolve: {
+      alias: { '@shared': resolve(__dirname, 'src/shared') },
+    },
+  },
+});
+```
+
+- [ ] **Step 8: Create `vitest.config.ts`**
+
+```ts
+import { defineConfig } from 'vitest/config';
+import { resolve } from 'path';
+
+export default defineConfig({
+  resolve: {
+    alias: { '@shared': resolve(__dirname, 'src/shared') },
+  },
+  test: {
+    environment: 'node',
+    include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+    coverage: {
+      provider: 'v8',
+      include: ['src/**'],
+      exclude: ['src/**/*.test.*', 'src/renderer/**/*.tsx'],
+    },
+  },
+});
+```
+
+- [ ] **Step 9: Install and verify**
+
+```bash
+npm install
+npm run typecheck
+```
+
+Expected: install completes; typecheck reports zero source files and exits 0.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add package.json package-lock.json tsconfig*.json electron.vite.config.ts vitest.config.ts .gitignore .editorconfig
+git commit -m "chore: scaffold electron-vite project with typescript"
+```
+
+---
+
+## Task 2: Minimal main/preload/renderer that boots
+
+**Files:**
+- Create: `src/main/index.ts`
+- Create: `src/preload/index.ts`
+- Create: `src/renderer/index.html`
+- Create: `src/renderer/main.tsx`
+- Create: `src/renderer/App.tsx`
+- Create: `src/shared/ipc.ts`
+
+- [ ] **Step 1: Create `src/shared/ipc.ts` (typed IPC channel registry — minimal for now)**
+
+```ts
+export const IpcChannels = {
+  Ping: 'app:ping',
+} as const;
+
+export type Api = {
+  ping(): Promise<'pong'>;
+};
+
+declare global {
+  interface Window {
+    api: Api;
+  }
+}
+```
+
+- [ ] **Step 2: Create `src/preload/index.ts`**
+
+```ts
+import { contextBridge, ipcRenderer } from 'electron';
+import { IpcChannels, type Api } from '@shared/ipc';
+
+const api: Api = {
+  ping: () => ipcRenderer.invoke(IpcChannels.Ping),
+};
+
+contextBridge.exposeInMainWorld('api', api);
+```
+
+- [ ] **Step 3: Create `src/main/index.ts`**
+
+```ts
+import { app, BrowserWindow, ipcMain, session } from 'electron';
+import { join } from 'path';
+import { IpcChannels } from '@shared/ipc';
+
+const isDev = !app.isPackaged;
+
+function createMainWindow(): BrowserWindow {
+  const win = new BrowserWindow({
+    width: 1100,
+    height: 720,
+    minWidth: 720,
+    minHeight: 480,
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  if (isDev && process.env['ELECTRON_RENDERER_URL']) {
+    win.loadURL(process.env['ELECTRON_RENDERER_URL']);
+  } else {
+    win.loadFile(join(__dirname, '../renderer/index.html'));
+  }
+
+  return win;
+}
+
+app.whenReady().then(() => {
+  session.defaultSession.webRequest.onHeadersReceived((details, cb) => {
+    cb({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Content-Security-Policy': [
+          "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https:; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:;",
+        ],
+      },
+    });
+  });
+
+  ipcMain.handle(IpcChannels.Ping, () => 'pong' as const);
+
+  createMainWindow();
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
+  });
+});
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});
+```
+
+- [ ] **Step 4: Create `src/renderer/index.html`**
+
+```html
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Voice Notes</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>
+```
+
+- [ ] **Step 5: Create `src/renderer/main.tsx`**
+
+```tsx
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import App from './App';
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+);
+```
+
+- [ ] **Step 6: Create `src/renderer/App.tsx`**
+
+```tsx
+import { useEffect, useState } from 'react';
+
+export default function App() {
+  const [pong, setPong] = useState<string>('…');
+
+  useEffect(() => {
+    window.api.ping().then(setPong).catch((e) => setPong(`error: ${e.message}`));
+  }, []);
+
+  return (
+    <main style={{ fontFamily: 'system-ui', padding: 24 }}>
+      <h1>Voice Notes</h1>
+      <p>IPC ping: {pong}</p>
+    </main>
+  );
+}
+```
+
+- [ ] **Step 7: Boot in dev and verify**
+
+```bash
+npm run dev
+```
+
+Expected: Electron window opens; renders "IPC ping: pong". Quit. Then:
+
+```bash
+npm run typecheck
+```
+
+Expected: passes.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/
+git commit -m "feat: minimal main/preload/renderer with typed IPC ping"
+```
+
+---
+
+## Task 3: SQLite — migrations runner + schema
+
+**Files:**
+- Create: `src/main/db/runner.ts`
+- Create: `src/main/db/migrations/001_init.sql`
+- Create: `src/main/db/index.ts`
+- Test: `src/main/db/runner.test.ts`
+- Test: `src/main/db/index.test.ts`
+
+- [ ] **Step 1: Write the failing test (`src/main/db/runner.test.ts`)**
+
+```ts
+import { describe, it, expect, beforeEach } from 'vitest';
+import Database from 'better-sqlite3';
+import { runMigrations } from './runner';
+
+describe('migrations runner', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+  });
+
+  it('creates schema_migrations table on first run', () => {
+    runMigrations(db, [{ version: 1, sql: 'CREATE TABLE foo (id INTEGER PRIMARY KEY)' }]);
+    const row = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'")
+      .get();
+    expect(row).toBeTruthy();
+  });
+
+  it('applies pending migrations in order and records them', () => {
+    runMigrations(db, [
+      { version: 1, sql: 'CREATE TABLE a (id INTEGER PRIMARY KEY)' },
+      { version: 2, sql: 'CREATE TABLE b (id INTEGER PRIMARY KEY)' },
+    ]);
+    const versions = db
+      .prepare('SELECT version FROM schema_migrations ORDER BY version')
+      .all() as Array<{ version: number }>;
+    expect(versions.map((v) => v.version)).toEqual([1, 2]);
+  });
+
+  it('skips already-applied migrations', () => {
+    runMigrations(db, [{ version: 1, sql: 'CREATE TABLE a (id INTEGER PRIMARY KEY)' }]);
+    runMigrations(db, [
+      { version: 1, sql: 'CREATE TABLE a (id INTEGER PRIMARY KEY)' },
+      { version: 2, sql: 'CREATE TABLE b (id INTEGER PRIMARY KEY)' },
+    ]);
+    const versions = db
+      .prepare('SELECT version FROM schema_migrations ORDER BY version')
+      .all() as Array<{ version: number }>;
+    expect(versions.map((v) => v.version)).toEqual([1, 2]);
+  });
+
+  it('runs each migration in a transaction (rollback on error)', () => {
+    expect(() =>
+      runMigrations(db, [
+        { version: 1, sql: 'CREATE TABLE a (id INTEGER PRIMARY KEY); SELECT bogus_function();' },
+      ]),
+    ).toThrow();
+    const row = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='a'")
+      .get();
+    expect(row).toBeFalsy();
+  });
+});
+```
+
+- [ ] **Step 2: Run, expect failure**
+
+```bash
+npx vitest run src/main/db/runner.test.ts
+```
+
+Expected: FAIL, module `./runner` not found.
+
+- [ ] **Step 3: Implement `src/main/db/runner.ts`**
+
+```ts
+import type Database from 'better-sqlite3';
+
+export interface Migration {
+  version: number;
+  sql: string;
+}
+
+export function runMigrations(db: Database.Database, migrations: Migration[]): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version    INTEGER PRIMARY KEY,
+      applied_at INTEGER NOT NULL
+    );
+  `);
+
+  const applied = new Set(
+    (db.prepare('SELECT version FROM schema_migrations').all() as Array<{ version: number }>).map(
+      (r) => r.version,
+    ),
+  );
+
+  const pending = [...migrations]
+    .sort((a, b) => a.version - b.version)
+    .filter((m) => !applied.has(m.version));
+
+  for (const m of pending) {
+    const tx = db.transaction(() => {
+      db.exec(m.sql);
+      db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(
+        m.version,
+        Date.now(),
+      );
+    });
+    tx();
+  }
+}
+```
+
+- [ ] **Step 4: Run, expect pass**
+
+```bash
+npx vitest run src/main/db/runner.test.ts
+```
+
+Expected: 4 passed.
+
+- [ ] **Step 5: Create `src/main/db/migrations/001_init.sql`**
+
+```sql
+PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE notes (
+  id            TEXT PRIMARY KEY,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL,
+  title         TEXT NOT NULL DEFAULT '',
+  markdown      TEXT NOT NULL DEFAULT '',
+  transcript    TEXT NOT NULL DEFAULT '',
+  audio_path    TEXT,
+  duration_ms   INTEGER NOT NULL DEFAULT 0,
+  status        TEXT NOT NULL CHECK (status IN (
+                  'transcribing','generating','ready',
+                  'transcription_failed','generation_failed','pending_network')),
+  error_message TEXT,
+  model_used    TEXT,
+  provider      TEXT
+);
+
+CREATE INDEX notes_created_at_idx ON notes (created_at DESC);
+
+CREATE VIRTUAL TABLE notes_fts USING fts5(
+  title, markdown, transcript,
+  content='notes', content_rowid='rowid',
+  tokenize='porter unicode61'
+);
+
+CREATE TRIGGER notes_ai AFTER INSERT ON notes BEGIN
+  INSERT INTO notes_fts(rowid, title, markdown, transcript)
+  VALUES (new.rowid, new.title, new.markdown, new.transcript);
+END;
+
+CREATE TRIGGER notes_ad AFTER DELETE ON notes BEGIN
+  INSERT INTO notes_fts(notes_fts, rowid, title, markdown, transcript)
+  VALUES ('delete', old.rowid, old.title, old.markdown, old.transcript);
+END;
+
+CREATE TRIGGER notes_au AFTER UPDATE ON notes BEGIN
+  INSERT INTO notes_fts(notes_fts, rowid, title, markdown, transcript)
+  VALUES ('delete', old.rowid, old.title, old.markdown, old.transcript);
+  INSERT INTO notes_fts(rowid, title, markdown, transcript)
+  VALUES (new.rowid, new.title, new.markdown, new.transcript);
+END;
+
+CREATE TABLE settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+```
+
+- [ ] **Step 6: Create `src/main/db/index.ts`**
+
+```ts
+import Database from 'better-sqlite3';
+import { runMigrations, type Migration } from './runner';
+import initSql from './migrations/001_init.sql?raw';
+
+export function openDatabase(filePath: string): Database.Database {
+  const db = new Database(filePath);
+  db.pragma('journal_mode = WAL');
+  db.pragma('foreign_keys = ON');
+
+  const migrations: Migration[] = [{ version: 1, sql: initSql }];
+  runMigrations(db, migrations);
+  return db;
+}
+```
+
+`?raw` imports work natively in Vite/Vitest — no extra config required.
+
+- [ ] **Step 7: Add a smoke test for `openDatabase`**
+
+`src/main/db/index.test.ts`:
+
+```ts
+import { describe, it, expect } from 'vitest';
+import { openDatabase } from './index';
+import { mkdtempSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+
+describe('openDatabase', () => {
+  it('applies the initial schema', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vn-'));
+    const db = openDatabase(join(dir, 'test.db'));
+    const tables = (db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+      .all() as Array<{ name: string }>).map((r) => r.name);
+    expect(tables).toContain('notes');
+    expect(tables).toContain('settings');
+    expect(tables).toContain('schema_migrations');
+    expect(tables).toContain('notes_fts');
+  });
+});
+```
+
+```bash
+npx vitest run src/main/db/
+```
+
+Expected: 5 passed.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/main/db/
+git commit -m "feat(db): sqlite migrations runner and initial schema"
+```
+
+---
+
+## Task 4: NoteStore — CRUD + status updates + FTS5 search
+
+**Files:**
+- Create: `src/main/db/store.ts`
+- Test: `src/main/db/store.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+`src/main/db/store.test.ts`:
+
+```ts
+import { describe, it, expect, beforeEach } from 'vitest';
+import { openDatabase } from './index';
+import { NoteStore, type NoteStatus } from './store';
+import { mkdtempSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+
+function freshStore(): NoteStore {
+  const dir = mkdtempSync(join(tmpdir(), 'vn-'));
+  return new NoteStore(openDatabase(join(dir, 'test.db')));
+}
+
+describe('NoteStore', () => {
+  let store: NoteStore;
+  beforeEach(() => {
+    store = freshStore();
+  });
+
+  it('creates a note in transcribing state', () => {
+    store.create({ id: 'n1', audioPath: '/tmp/a.webm', durationMs: 12345 });
+    const note = store.get('n1')!;
+    expect(note.status).toBe<NoteStatus>('transcribing');
+    expect(note.audioPath).toBe('/tmp/a.webm');
+    expect(note.durationMs).toBe(12345);
+    expect(note.title).toBe('');
+    expect(note.markdown).toBe('');
+  });
+
+  it('lists notes in reverse chronological order', () => {
+    store.create({ id: 'n1', audioPath: '/tmp/1.webm', durationMs: 1 });
+    store.create({ id: 'n2', audioPath: '/tmp/2.webm', durationMs: 2 });
+    const list = store.list();
+    expect(list.map((n) => n.id)).toEqual(['n2', 'n1']);
+  });
+
+  it('updates status and error message', () => {
+    store.create({ id: 'n1', audioPath: '/tmp/a.webm', durationMs: 1 });
+    store.updateStatus('n1', 'transcription_failed', 'whisper crashed');
+    const note = store.get('n1')!;
+    expect(note.status).toBe<NoteStatus>('transcription_failed');
+    expect(note.errorMessage).toBe('whisper crashed');
+  });
+
+  it('sets transcript', () => {
+    store.create({ id: 'n1', audioPath: '/tmp/a.webm', durationMs: 1 });
+    store.setTranscript('n1', 'hello world');
+    expect(store.get('n1')!.transcript).toBe('hello world');
+  });
+
+  it('sets markdown + title and marks ready', () => {
+    store.create({ id: 'n1', audioPath: '/tmp/a.webm', durationMs: 1 });
+    store.setMarkdown('n1', '# Hi\n\nbody', 'Hi', 'claude-opus-4-7', 'anthropic');
+    const note = store.get('n1')!;
+    expect(note.title).toBe('Hi');
+    expect(note.markdown).toBe('# Hi\n\nbody');
+    expect(note.status).toBe<NoteStatus>('ready');
+    expect(note.modelUsed).toBe('claude-opus-4-7');
+    expect(note.provider).toBe('anthropic');
+  });
+
+  it('updateMarkdown bumps updated_at and replaces title', () => {
+    store.create({ id: 'n1', audioPath: '/tmp/a.webm', durationMs: 1 });
+    store.setMarkdown('n1', '# Hi', 'Hi', 'm', 'p');
+    const before = store.get('n1')!.updatedAt;
+    const start = Date.now();
+    while (Date.now() === start) { /* spin until clock advances */ }
+    store.updateMarkdown('n1', '# Renamed\n\nbody', 'Renamed');
+    const after = store.get('n1')!;
+    expect(after.title).toBe('Renamed');
+    expect(after.updatedAt).toBeGreaterThan(before);
+  });
+
+  it('deletes a note', () => {
+    store.create({ id: 'n1', audioPath: '/tmp/a.webm', durationMs: 1 });
+    store.delete('n1');
+    expect(store.get('n1')).toBeUndefined();
+  });
+
+  it('deleteAudio nulls audio_path but keeps the note', () => {
+    store.create({ id: 'n1', audioPath: '/tmp/a.webm', durationMs: 1 });
+    store.deleteAudio('n1');
+    expect(store.get('n1')!.audioPath).toBeNull();
+  });
+
+  it('full-text search finds notes by markdown content', () => {
+    store.create({ id: 'n1', audioPath: '/tmp/1.webm', durationMs: 1 });
+    store.create({ id: 'n2', audioPath: '/tmp/2.webm', durationMs: 1 });
+    store.setMarkdown('n1', '# Meeting\n\nDiscussed pelicans', 'Meeting', 'm', 'p');
+    store.setMarkdown('n2', '# Lunch\n\nDiscussed sandwiches', 'Lunch', 'm', 'p');
+    const hits = store.list({ search: 'pelican' });
+    expect(hits.map((h) => h.id)).toEqual(['n1']);
+  });
+
+  it('full-text search supports prefix match', () => {
+    store.create({ id: 'n1', audioPath: '/tmp/1.webm', durationMs: 1 });
+    store.setMarkdown('n1', '# Notes\n\nPelicanesque ideas', 'Notes', 'm', 'p');
+    expect(store.list({ search: 'pel' }).length).toBe(1);
+  });
+});
+```
+
+- [ ] **Step 2: Run, expect failure**
+
+```bash
+npx vitest run src/main/db/store.test.ts
+```
+
+- [ ] **Step 3: Implement `src/main/db/store.ts`**
+
+```ts
+import type Database from 'better-sqlite3';
+
+export type NoteStatus =
+  | 'transcribing'
+  | 'generating'
+  | 'ready'
+  | 'transcription_failed'
+  | 'generation_failed'
+  | 'pending_network';
+
+export interface NoteSummary {
+  id: string;
+  createdAt: number;
+  updatedAt: number;
+  title: string;
+  status: NoteStatus;
+  durationMs: number;
+}
+
+export interface Note extends NoteSummary {
+  markdown: string;
+  transcript: string;
+  audioPath: string | null;
+  errorMessage: string | null;
+  modelUsed: string | null;
+  provider: string | null;
+}
+
+interface NoteRow {
+  id: string;
+  created_at: number;
+  updated_at: number;
+  title: string;
+  markdown: string;
+  transcript: string;
+  audio_path: string | null;
+  duration_ms: number;
+  status: NoteStatus;
+  error_message: string | null;
+  model_used: string | null;
+  provider: string | null;
+}
+
+const ALL_COLS = `id, created_at, updated_at, title, markdown, transcript, audio_path,
+  duration_ms, status, error_message, model_used, provider`;
+
+function rowToNote(r: NoteRow): Note {
+  return {
+    id: r.id,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+    title: r.title,
+    markdown: r.markdown,
+    transcript: r.transcript,
+    audioPath: r.audio_path,
+    durationMs: r.duration_ms,
+    status: r.status,
+    errorMessage: r.error_message,
+    modelUsed: r.model_used,
+    provider: r.provider,
+  };
+}
+
+export class NoteStore {
+  constructor(private readonly db: Database.Database) {}
+
+  create(input: { id: string; audioPath: string; durationMs: number }): void {
+    const now = Date.now();
+    this.db
+      .prepare(
+        `INSERT INTO notes (id, created_at, updated_at, audio_path, duration_ms, status)
+         VALUES (?, ?, ?, ?, ?, 'transcribing')`,
+      )
+      .run(input.id, now, now, input.audioPath, input.durationMs);
+  }
+
+  updateStatus(id: string, status: NoteStatus, errorMessage?: string): void {
+    this.db
+      .prepare('UPDATE notes SET status=?, error_message=?, updated_at=? WHERE id=?')
+      .run(status, errorMessage ?? null, Date.now(), id);
+  }
+
+  setTranscript(id: string, transcript: string): void {
+    this.db.prepare('UPDATE notes SET transcript=?, updated_at=? WHERE id=?').run(
+      transcript,
+      Date.now(),
+      id,
+    );
+  }
+
+  setMarkdown(id: string, markdown: string, title: string, modelUsed: string, provider: string): void {
+    this.db
+      .prepare(
+        `UPDATE notes
+            SET markdown=?, title=?, model_used=?, provider=?, status='ready',
+                error_message=NULL, updated_at=?
+          WHERE id=?`,
+      )
+      .run(markdown, title, modelUsed, provider, Date.now(), id);
+  }
+
+  updateMarkdown(id: string, markdown: string, title: string): void {
+    this.db.prepare('UPDATE notes SET markdown=?, title=?, updated_at=? WHERE id=?').run(
+      markdown,
+      title,
+      Date.now(),
+      id,
+    );
+  }
+
+  list(opts?: { search?: string; limit?: number }): NoteSummary[] {
+    const limit = opts?.limit ?? 200;
+    if (opts?.search && opts.search.trim().length > 0) {
+      const rows = this.db
+        .prepare(
+          `SELECT n.id, n.created_at, n.updated_at, n.title, n.status, n.duration_ms
+             FROM notes n
+             JOIN notes_fts f ON f.rowid = n.rowid
+            WHERE notes_fts MATCH ?
+            ORDER BY n.created_at DESC
+            LIMIT ?`,
+        )
+        .all(escapeFts(opts.search), limit) as NoteRow[];
+      return rows.map((r) => ({
+        id: r.id,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+        title: r.title,
+        status: r.status,
+        durationMs: r.duration_ms,
+      }));
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT id, created_at, updated_at, title, status, duration_ms
+           FROM notes ORDER BY created_at DESC LIMIT ?`,
+      )
+      .all(limit) as NoteRow[];
+    return rows.map((r) => ({
+      id: r.id,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+      title: r.title,
+      status: r.status,
+      durationMs: r.duration_ms,
+    }));
+  }
+
+  get(id: string): Note | undefined {
+    const row = this.db.prepare(`SELECT ${ALL_COLS} FROM notes WHERE id=?`).get(id) as
+      | NoteRow
+      | undefined;
+    return row ? rowToNote(row) : undefined;
+  }
+
+  delete(id: string): void {
+    this.db.prepare('DELETE FROM notes WHERE id=?').run(id);
+  }
+
+  deleteAudio(id: string): void {
+    this.db.prepare('UPDATE notes SET audio_path=NULL, updated_at=? WHERE id=?').run(
+      Date.now(),
+      id,
+    );
+  }
+}
+
+function escapeFts(input: string): string {
+  return input
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((t) => `"${t.replace(/"/g, '""')}"*`)
+    .join(' ');
+}
+```
+
+- [ ] **Step 4: Run, expect pass**
+
+```bash
+npx vitest run src/main/db/store.test.ts
+```
+
+Expected: 10 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/main/db/store.ts src/main/db/store.test.ts
+git commit -m "feat(db): NoteStore with crud, status updates, and FTS5 search"
+```
+
+---
+
+## Task 5: SettingsStore with safeStorage encryption
+
+**Files:**
+- Create: `src/main/settings.ts`
+- Test: `src/main/settings.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+`src/main/settings.test.ts`:
+
+```ts
+import { describe, it, expect, vi } from 'vitest';
+import Database from 'better-sqlite3';
+import { runMigrations } from './db/runner';
+import initSql from './db/migrations/001_init.sql?raw';
+import { SettingsStore, type Settings } from './settings';
+
+function freshDb(): Database.Database {
+  const db = new Database(':memory:');
+  runMigrations(db, [{ version: 1, sql: initSql }]);
+  return db;
+}
+
+const fakeSafeStorage = {
+  isEncryptionAvailable: () => true,
+  encryptString: (s: string) => Buffer.from(`enc:${s}`),
+  decryptString: (b: Buffer) => b.toString('utf8').replace(/^enc:/, ''),
+};
+
+describe('SettingsStore', () => {
+  it('returns defaults when nothing is persisted', () => {
+    const store = new SettingsStore(freshDb(), fakeSafeStorage as any);
+    const s: Settings = store.read();
+    expect(s.provider).toBe('anthropic');
+    expect(s.apiKey).toBe('');
+    expect(s.hotkeyEnabled).toBe(false);
+    expect(s.keepAudioDefault).toBe(true);
+    expect(s.model).toBe('claude-opus-4-7');
+  });
+
+  it('persists and re-reads settings', () => {
+    const db = freshDb();
+    const store = new SettingsStore(db, fakeSafeStorage as any);
+    store.write({
+      provider: 'openrouter',
+      apiKey: 'sk-test',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'anthropic/claude-opus-4-7',
+      hotkeyEnabled: true,
+      hotkeyAccelerator: 'CommandOrControl+Shift+N',
+      keepAudioDefault: false,
+    });
+    const fresh = new SettingsStore(db, fakeSafeStorage as any);
+    expect(fresh.read()).toEqual({
+      provider: 'openrouter',
+      apiKey: 'sk-test',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'anthropic/claude-opus-4-7',
+      hotkeyEnabled: true,
+      hotkeyAccelerator: 'CommandOrControl+Shift+N',
+      keepAudioDefault: false,
+    });
+  });
+
+  it('encrypts the api key on write', () => {
+    const encrypt = vi.spyOn(fakeSafeStorage, 'encryptString');
+    const store = new SettingsStore(freshDb(), fakeSafeStorage as any);
+    store.write({ ...store.read(), apiKey: 'sk-secret' });
+    expect(encrypt).toHaveBeenCalledWith('sk-secret');
+  });
+
+  it('falls back to plaintext when encryption is unavailable', () => {
+    const noEncryption = { ...fakeSafeStorage, isEncryptionAvailable: () => false };
+    const db = freshDb();
+    const store = new SettingsStore(db, noEncryption as any);
+    store.write({ ...store.read(), apiKey: 'sk-plain' });
+    expect(store.read().apiKey).toBe('sk-plain');
+  });
+});
+```
+
+- [ ] **Step 2: Run, expect failure**
+
+```bash
+npx vitest run src/main/settings.test.ts
+```
+
+- [ ] **Step 3: Implement `src/main/settings.ts`**
+
+```ts
+import type Database from 'better-sqlite3';
+import type { safeStorage as ElectronSafeStorage } from 'electron';
+
+export type Provider = 'anthropic' | 'openrouter' | 'custom';
+
+export interface Settings {
+  provider: Provider;
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  hotkeyEnabled: boolean;
+  hotkeyAccelerator: string;
+  keepAudioDefault: boolean;
+}
+
+const DEFAULTS: Settings = {
+  provider: 'anthropic',
+  apiKey: '',
+  baseUrl: '',
+  model: 'claude-opus-4-7',
+  hotkeyEnabled: false,
+  hotkeyAccelerator: 'CommandOrControl+Shift+N',
+  keepAudioDefault: true,
+};
+
+const KEY_API_ENCRYPTED = 'api_key_encrypted';
+const KEY_API_PLAINTEXT = 'api_key_plaintext';
+
+type SafeStorage = Pick<
+  typeof ElectronSafeStorage,
+  'isEncryptionAvailable' | 'encryptString' | 'decryptString'
+>;
+
+export class SettingsStore {
+  constructor(
+    private readonly db: Database.Database,
+    private readonly safeStorage: SafeStorage,
+  ) {}
+
+  read(): Settings {
+    const rows = this.db.prepare('SELECT key, value FROM settings').all() as Array<{
+      key: string;
+      value: string;
+    }>;
+    const map = new Map(rows.map((r) => [r.key, r.value]));
+
+    const get = <K extends keyof Settings>(key: K): Settings[K] | undefined => {
+      const raw = map.get(key);
+      return raw === undefined ? undefined : (JSON.parse(raw) as Settings[K]);
+    };
+
+    let apiKey = '';
+    const encrypted = map.get(KEY_API_ENCRYPTED);
+    if (encrypted) {
+      try {
+        apiKey = this.safeStorage.decryptString(Buffer.from(encrypted, 'base64'));
+      } catch {
+        apiKey = '';
+      }
+    } else {
+      apiKey = map.get(KEY_API_PLAINTEXT) ?? '';
+    }
+
+    return {
+      provider: get('provider') ?? DEFAULTS.provider,
+      apiKey,
+      baseUrl: get('baseUrl') ?? DEFAULTS.baseUrl,
+      model: get('model') ?? DEFAULTS.model,
+      hotkeyEnabled: get('hotkeyEnabled') ?? DEFAULTS.hotkeyEnabled,
+      hotkeyAccelerator: get('hotkeyAccelerator') ?? DEFAULTS.hotkeyAccelerator,
+      keepAudioDefault: get('keepAudioDefault') ?? DEFAULTS.keepAudioDefault,
+    };
+  }
+
+  write(s: Settings): void {
+    const upsert = this.db.prepare(
+      `INSERT INTO settings (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    );
+
+    const tx = this.db.transaction((settings: Settings) => {
+      const fieldsToPersist: Array<[string, unknown]> = [
+        ['provider', settings.provider],
+        ['baseUrl', settings.baseUrl],
+        ['model', settings.model],
+        ['hotkeyEnabled', settings.hotkeyEnabled],
+        ['hotkeyAccelerator', settings.hotkeyAccelerator],
+        ['keepAudioDefault', settings.keepAudioDefault],
+      ];
+      for (const [k, v] of fieldsToPersist) {
+        upsert.run(k, JSON.stringify(v));
+      }
+
+      this.db.prepare('DELETE FROM settings WHERE key IN (?, ?)').run(
+        KEY_API_ENCRYPTED,
+        KEY_API_PLAINTEXT,
+      );
+      if (settings.apiKey) {
+        if (this.safeStorage.isEncryptionAvailable()) {
+          const enc = this.safeStorage.encryptString(settings.apiKey).toString('base64');
+          upsert.run(KEY_API_ENCRYPTED, enc);
+        } else {
+          upsert.run(KEY_API_PLAINTEXT, settings.apiKey);
+        }
+      }
+    });
+
+    tx(s);
+  }
+}
+```
+
+- [ ] **Step 4: Run, expect pass; commit**
+
+```bash
+npx vitest run src/main/settings.test.ts
+git add src/main/settings.ts src/main/settings.test.ts
+git commit -m "feat(settings): persistent settings with safeStorage encryption"
+```
+
+---
+
+## Task 6: LLMClient interface, prompts, AnthropicClient
+
+**Files:**
+- Create: `src/main/llm/client.ts`
+- Create: `src/main/llm/prompts.ts`
+- Create: `src/main/llm/anthropic.ts`
+- Test: `src/main/llm/anthropic.test.ts`
+- Test: `src/main/llm/prompts.test.ts`
+
+- [ ] **Step 1: Create `src/main/llm/client.ts`**
+
+```ts
+export interface NoteChunk {
+  delta: string;
+}
+
+export interface LLMClient {
+  streamNotes(transcript: string, opts?: { signal?: AbortSignal }): AsyncIterable<NoteChunk>;
+}
+
+export interface LLMConfig {
+  provider: 'anthropic' | 'openrouter' | 'custom';
+  apiKey: string;
+  baseUrl?: string;
+  model: string;
+}
+```
+
+- [ ] **Step 2: Create `src/main/llm/prompts.ts` and its test**
+
+`src/main/llm/prompts.test.ts`:
+
+```ts
+import { describe, it, expect } from 'vitest';
+import { SYSTEM_PROMPT, buildUserPrompt } from './prompts';
+
+describe('prompts', () => {
+  it('SYSTEM_PROMPT mentions a single H1 title and bullets', () => {
+    expect(SYSTEM_PROMPT).toMatch(/single H1/);
+    expect(SYSTEM_PROMPT).toMatch(/bullets/);
+  });
+
+  it('buildUserPrompt embeds the transcript verbatim inside a fenced block', () => {
+    const out = buildUserPrompt('hello world');
+    expect(out).toContain('hello world');
+    expect(out).toMatch(/```transcript[\s\S]+```/);
+  });
+});
+```
+
+`src/main/llm/prompts.ts`:
+
+```ts
+export const SYSTEM_PROMPT = `You turn a raw spoken-voice transcript into a clean, readable note that a busy person can re-read days later.
+
+Rules:
+- Begin with a single H1 title that captures the gist (under 8 words, no trailing punctuation).
+- Use additional headings (##) and bullets where the content warrants — do not force structure on short notes.
+- Preserve the speaker's voice and intent. Do not invent facts. Do not editorialize.
+- Fix obvious filler words ("um", "you know"), false starts, and disfluencies.
+- If the transcript contains action items, decisions, or open questions, surface them under clearly named sections.
+- If the transcript is incoherent or empty, output a single H1 "Empty note" and nothing else.
+- Output GitHub-flavored Markdown only. No preamble, no commentary, no closing line.`;
+
+export function buildUserPrompt(transcript: string): string {
+  return `Here is the transcript. Turn it into the note now.\n\n\`\`\`transcript\n${transcript}\n\`\`\``;
+}
+```
+
+```bash
+npx vitest run src/main/llm/prompts.test.ts
+```
+
+Expected: 2 passed.
+
+- [ ] **Step 3: Write the failing AnthropicClient test**
+
+`src/main/llm/anthropic.test.ts`:
+
+```ts
+import { describe, it, expect, vi } from 'vitest';
+import { AnthropicClient } from './anthropic';
+
+function fakeAnthropicSdk(deltas: string[]) {
+  return {
+    messages: {
+      stream: vi.fn().mockReturnValue({
+        async *[Symbol.asyncIterator]() {
+          for (const d of deltas) {
+            yield { type: 'content_block_delta', delta: { type: 'text_delta', text: d } } as any;
+          }
+        },
+      }),
+    },
+  };
+}
+
+describe('AnthropicClient', () => {
+  it('yields text deltas from the SDK stream', async () => {
+    const sdk = fakeAnthropicSdk(['Hello ', 'world']);
+    const client = new AnthropicClient({
+      provider: 'anthropic',
+      apiKey: 'k',
+      model: 'claude-opus-4-7',
+    }, sdk as any);
+
+    const chunks: string[] = [];
+    for await (const c of client.streamNotes('hi')) chunks.push(c.delta);
+    expect(chunks.join('')).toBe('Hello world');
+  });
+
+  it('passes the configured model and an ephemeral cache_control system block', async () => {
+    const sdk = fakeAnthropicSdk([]);
+    const client = new AnthropicClient({
+      provider: 'anthropic',
+      apiKey: 'k',
+      model: 'claude-opus-4-7',
+    }, sdk as any);
+    for await (const _ of client.streamNotes('hi')) { /* drain */ }
+
+    const arg = (sdk.messages.stream as any).mock.calls[0][0];
+    expect(arg.model).toBe('claude-opus-4-7');
+    expect(Array.isArray(arg.system)).toBe(true);
+    expect(arg.system[0].cache_control).toEqual({ type: 'ephemeral' });
+    expect(arg.messages[0].role).toBe('user');
+  });
+
+  it('forwards an AbortSignal to the SDK', async () => {
+    const sdk = fakeAnthropicSdk([]);
+    const client = new AnthropicClient(
+      { provider: 'anthropic', apiKey: 'k', model: 'm' },
+      sdk as any,
+    );
+    const ctrl = new AbortController();
+    for await (const _ of client.streamNotes('hi', { signal: ctrl.signal })) { /* drain */ }
+    const opts = (sdk.messages.stream as any).mock.calls[0][1];
+    expect(opts.signal).toBe(ctrl.signal);
+  });
+});
+```
+
+- [ ] **Step 4: Run, expect failure**
+
+```bash
+npx vitest run src/main/llm/anthropic.test.ts
+```
+
+- [ ] **Step 5: Implement `src/main/llm/anthropic.ts`**
+
+Verify the Anthropic SDK's current stream API via Context7 before edits — `client.messages.stream(...)` returns a `MessageStream` that is async-iterable yielding event objects of shapes like `content_block_delta`.
+
+```ts
+import Anthropic from '@anthropic-ai/sdk';
+import type { LLMClient, LLMConfig, NoteChunk } from './client';
+import { SYSTEM_PROMPT, buildUserPrompt } from './prompts';
+
+type AnthropicLike = {
+  messages: {
+    stream: (
+      args: {
+        model: string;
+        max_tokens: number;
+        system: Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }>;
+        messages: Array<{ role: 'user'; content: string }>;
+      },
+      opts?: { signal?: AbortSignal },
+    ) => AsyncIterable<unknown>;
+  };
+};
+
+export class AnthropicClient implements LLMClient {
+  private readonly sdk: AnthropicLike;
+
+  constructor(private readonly config: LLMConfig, sdk?: AnthropicLike) {
+    this.sdk =
+      sdk ??
+      (new Anthropic({
+        apiKey: config.apiKey,
+        ...(config.baseUrl ? { baseURL: config.baseUrl } : {}),
+      }) as unknown as AnthropicLike);
+  }
+
+  async *streamNotes(
+    transcript: string,
+    opts?: { signal?: AbortSignal },
+  ): AsyncIterable<NoteChunk> {
+    const stream = this.sdk.messages.stream(
+      {
+        model: this.config.model,
+        max_tokens: 4096,
+        system: [
+          { type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
+        ],
+        messages: [{ role: 'user', content: buildUserPrompt(transcript) }],
+      },
+      opts?.signal ? { signal: opts.signal } : undefined,
+    );
+
+    for await (const event of stream as AsyncIterable<any>) {
+      if (event?.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+        yield { delta: event.delta.text as string };
+      }
+    }
+  }
+}
+```
+
+- [ ] **Step 6: Run, expect pass; commit**
+
+```bash
+npx vitest run src/main/llm/
+git add src/main/llm/
+git commit -m "feat(llm): LLMClient interface, prompts, AnthropicClient with caching"
+```
+
+---
+
+## Task 7: OpenAICompatClient (OpenRouter + custom)
+
+**Files:**
+- Create: `src/main/llm/openai-compat.ts`
+- Test: `src/main/llm/openai-compat.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+import { describe, it, expect, vi } from 'vitest';
+import { OpenAICompatClient } from './openai-compat';
+
+function fakeOpenAi(deltas: string[]) {
+  return {
+    chat: {
+      completions: {
+        create: vi.fn(async () => ({
+          async *[Symbol.asyncIterator]() {
+            for (const d of deltas) {
+              yield { choices: [{ delta: { content: d } }] } as any;
+            }
+          },
+        })),
+      },
+    },
+  };
+}
+
+describe('OpenAICompatClient', () => {
+  it('streams text deltas via chat.completions.create', async () => {
+    const sdk = fakeOpenAi(['Hi ', 'there']);
+    const client = new OpenAICompatClient(
+      { provider: 'openrouter', apiKey: 'k', model: 'anthropic/claude-opus-4-7', baseUrl: 'https://openrouter.ai/api/v1' },
+      sdk as any,
+    );
+    const out: string[] = [];
+    for await (const c of client.streamNotes('x')) out.push(c.delta);
+    expect(out.join('')).toBe('Hi there');
+  });
+
+  it('sends model, system + user messages, and stream:true', async () => {
+    const sdk = fakeOpenAi([]);
+    const client = new OpenAICompatClient(
+      { provider: 'custom', apiKey: 'k', model: 'gpt-foo', baseUrl: 'http://localhost:11434/v1' },
+      sdk as any,
+    );
+    for await (const _ of client.streamNotes('x')) { /* drain */ }
+
+    const arg = (sdk.chat.completions.create as any).mock.calls[0][0];
+    expect(arg.model).toBe('gpt-foo');
+    expect(arg.stream).toBe(true);
+    expect(arg.messages[0]).toMatchObject({ role: 'system' });
+    expect(arg.messages[1]).toMatchObject({ role: 'user' });
+  });
+
+  it('aborts the create call when signal fires', async () => {
+    const sdk = fakeOpenAi([]);
+    const client = new OpenAICompatClient(
+      { provider: 'custom', apiKey: 'k', model: 'm', baseUrl: 'x' },
+      sdk as any,
+    );
+    const ctrl = new AbortController();
+    for await (const _ of client.streamNotes('x', { signal: ctrl.signal })) { /* drain */ }
+    const opts = (sdk.chat.completions.create as any).mock.calls[0][1];
+    expect(opts.signal).toBe(ctrl.signal);
+  });
+});
+```
+
+- [ ] **Step 2: Implement `src/main/llm/openai-compat.ts`**
+
+```ts
+import OpenAI from 'openai';
+import type { LLMClient, LLMConfig, NoteChunk } from './client';
+import { SYSTEM_PROMPT, buildUserPrompt } from './prompts';
+
+type OpenAiLike = {
+  chat: {
+    completions: {
+      create: (
+        args: {
+          model: string;
+          stream: true;
+          messages: Array<{ role: 'system' | 'user'; content: string }>;
+        },
+        opts?: { signal?: AbortSignal },
+      ) => Promise<AsyncIterable<unknown>>;
+    };
+  };
+};
+
+export class OpenAICompatClient implements LLMClient {
+  private readonly sdk: OpenAiLike;
+
+  constructor(private readonly config: LLMConfig, sdk?: OpenAiLike) {
+    this.sdk =
+      sdk ??
+      (new OpenAI({
+        apiKey: config.apiKey,
+        baseURL: config.baseUrl,
+      }) as unknown as OpenAiLike);
+  }
+
+  async *streamNotes(
+    transcript: string,
+    opts?: { signal?: AbortSignal },
+  ): AsyncIterable<NoteChunk> {
+    const stream = await this.sdk.chat.completions.create(
+      {
+        model: this.config.model,
+        stream: true,
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: buildUserPrompt(transcript) },
+        ],
+      },
+      opts?.signal ? { signal: opts.signal } : undefined,
+    );
+
+    for await (const event of stream as AsyncIterable<any>) {
+      const delta = event?.choices?.[0]?.delta?.content;
+      if (typeof delta === 'string' && delta.length > 0) {
+        yield { delta };
+      }
+    }
+  }
+}
+```
+
+- [ ] **Step 3: Run, expect pass; commit**
+
+```bash
+npx vitest run src/main/llm/
+git add src/main/llm/openai-compat.ts src/main/llm/openai-compat.test.ts
+git commit -m "feat(llm): OpenAI-compatible streaming client"
+```
+
+---
+
+## Task 8: LLM client factory
+
+**Files:**
+- Create: `src/main/llm/factory.ts`
+- Test: `src/main/llm/factory.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+import { describe, it, expect } from 'vitest';
+import { createLLMClient } from './factory';
+import { AnthropicClient } from './anthropic';
+import { OpenAICompatClient } from './openai-compat';
+
+describe('createLLMClient', () => {
+  const base = {
+    apiKey: 'k',
+    model: 'm',
+    hotkeyEnabled: false,
+    hotkeyAccelerator: '',
+    keepAudioDefault: true,
+  };
+
+  it('returns AnthropicClient for provider=anthropic', () => {
+    const c = createLLMClient({ ...base, provider: 'anthropic', baseUrl: '', model: 'claude-opus-4-7' });
+    expect(c).toBeInstanceOf(AnthropicClient);
+  });
+
+  it('returns OpenAICompatClient for openrouter and custom', () => {
+    expect(
+      createLLMClient({ ...base, provider: 'openrouter', baseUrl: 'https://openrouter.ai/api/v1' }),
+    ).toBeInstanceOf(OpenAICompatClient);
+    expect(
+      createLLMClient({ ...base, provider: 'custom', baseUrl: 'http://localhost' }),
+    ).toBeInstanceOf(OpenAICompatClient);
+  });
+
+  it('throws if api key is empty', () => {
+    expect(() =>
+      createLLMClient({ ...base, apiKey: '', provider: 'anthropic', baseUrl: '' }),
+    ).toThrowError(/api key/i);
+  });
+
+  it('throws if custom provider has no baseUrl', () => {
+    expect(() =>
+      createLLMClient({ ...base, provider: 'custom', baseUrl: '' }),
+    ).toThrowError(/base url/i);
+  });
+});
+```
+
+- [ ] **Step 2: Implement `src/main/llm/factory.ts`**
+
+```ts
+import type { Settings } from '../settings';
+import { AnthropicClient } from './anthropic';
+import { OpenAICompatClient } from './openai-compat';
+import type { LLMClient } from './client';
+
+export function createLLMClient(settings: Settings): LLMClient {
+  if (!settings.apiKey) throw new Error('API key is not configured');
+
+  switch (settings.provider) {
+    case 'anthropic':
+      return new AnthropicClient({
+        provider: 'anthropic',
+        apiKey: settings.apiKey,
+        baseUrl: settings.baseUrl || undefined,
+        model: settings.model,
+      });
+    case 'openrouter':
+      return new OpenAICompatClient({
+        provider: 'openrouter',
+        apiKey: settings.apiKey,
+        baseUrl: settings.baseUrl || 'https://openrouter.ai/api/v1',
+        model: settings.model,
+      });
+    case 'custom':
+      if (!settings.baseUrl) throw new Error('Base URL is required for custom provider');
+      return new OpenAICompatClient({
+        provider: 'custom',
+        apiKey: settings.apiKey,
+        baseUrl: settings.baseUrl,
+        model: settings.model,
+      });
+  }
+}
+```
+
+- [ ] **Step 3: Run, expect pass; commit**
+
+```bash
+npx vitest run src/main/llm/factory.test.ts
+git add src/main/llm/factory.ts src/main/llm/factory.test.ts
+git commit -m "feat(llm): factory selecting client by provider"
+```
+
+---
+
+## Task 9: Subprocess helper + AudioPreprocessor
+
+**Files:**
+- Create: `src/main/util/subprocess.ts`
+- Test: `src/main/util/subprocess.test.ts`
+- Create: `src/main/whisper/audio-preprocessor.ts`
+- Test: `src/main/whisper/audio-preprocessor.test.ts`
+
+The helper uses Node's `child_process.spawn` (NOT `exec`). All command arguments are passed as a typed array; we never interpolate user input into a shell string. No `shell: true`. This is the safe pattern for sidecar invocation.
+
+- [ ] **Step 1: Test the subprocess helper**
+
+`src/main/util/subprocess.test.ts`:
+
+```ts
+import { describe, it, expect } from 'vitest';
+import { runProcess } from './subprocess';
+
+describe('runProcess', () => {
+  it('resolves with stdout for exit code 0', async () => {
+    const r = await runProcess(process.execPath, ['-e', "process.stdout.write('hi')"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout.trim()).toBe('hi');
+  });
+
+  it('rejects with stderr for non-zero exit', async () => {
+    await expect(
+      runProcess(process.execPath, ['-e', "process.stderr.write('boom'); process.exit(2)"]),
+    ).rejects.toThrow(/boom/);
+  });
+});
+```
+
+- [ ] **Step 2: Implement `src/main/util/subprocess.ts`**
+
+```ts
+import { spawn } from 'node:child_process';
+
+export interface ProcessResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+}
+
+/**
+ * Runs an external program with explicit arguments.
+ * Uses spawn (NOT exec) and never opens a shell, so arguments cannot be
+ * interpreted as shell metacharacters. This is the safe wrapper for sidecar
+ * binaries (whisper, ffmpeg).
+ */
+export function runProcess(
+  command: string,
+  args: string[],
+  opts?: { signal?: AbortSignal; cwd?: string },
+): Promise<ProcessResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: opts?.cwd,
+      shell: false,
+    });
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d: Buffer) => (stdout += d.toString('utf8')));
+    child.stderr.on('data', (d: Buffer) => (stderr += d.toString('utf8')));
+
+    const onAbort = () => child.kill('SIGTERM');
+    opts?.signal?.addEventListener('abort', onAbort, { once: true });
+
+    child.on('error', (err) => {
+      opts?.signal?.removeEventListener('abort', onAbort);
+      reject(err);
+    });
+    child.on('close', (code) => {
+      opts?.signal?.removeEventListener('abort', onAbort);
+      if (code === 0) resolve({ code: 0, stdout, stderr });
+      else reject(new Error(stderr || `process exited with code ${code}`));
+    });
+  });
+}
+```
+
+```bash
+npx vitest run src/main/util/subprocess.test.ts
+```
+
+Expected: 2 passed.
+
+- [ ] **Step 3: Write the failing AudioPreprocessor test**
+
+`src/main/whisper/audio-preprocessor.test.ts`:
+
+```ts
+import { describe, it, expect, vi } from 'vitest';
+import { AudioPreprocessor } from './audio-preprocessor';
+
+describe('AudioPreprocessor', () => {
+  it('runs ffmpeg with 16k mono wav args and returns the output path', async () => {
+    const run = vi.fn().mockResolvedValue({ code: 0, stdout: '', stderr: '' });
+    const pre = new AudioPreprocessor({
+      ffmpegPath: '/bin/ffmpeg',
+      tmpDir: '/tmp/vn',
+      now: () => 1700000000000,
+      run,
+    });
+    const out = await pre.preprocess('/in/a.webm');
+    expect(out).toBe('/tmp/vn/1700000000000.wav');
+    expect(run).toHaveBeenCalledWith(
+      '/bin/ffmpeg',
+      ['-y', '-i', '/in/a.webm', '-ar', '16000', '-ac', '1', '-f', 'wav', '/tmp/vn/1700000000000.wav'],
+      expect.anything(),
+    );
+  });
+
+  it('propagates ffmpeg failure', async () => {
+    const run = vi.fn().mockRejectedValue(new Error('ffmpeg crashed'));
+    const pre = new AudioPreprocessor({
+      ffmpegPath: '/bin/ffmpeg',
+      tmpDir: '/tmp/vn',
+      now: () => 1,
+      run,
+    });
+    await expect(pre.preprocess('/in/a.webm')).rejects.toThrow(/ffmpeg crashed/);
+  });
+});
+```
+
+- [ ] **Step 4: Implement `src/main/whisper/audio-preprocessor.ts`**
+
+```ts
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { runProcess, type ProcessResult } from '../util/subprocess';
+
+export interface AudioPreprocessorDeps {
+  ffmpegPath: string;
+  tmpDir: string;
+  now?: () => number;
+  run?: (cmd: string, args: string[], opts?: { signal?: AbortSignal }) => Promise<ProcessResult>;
+}
+
+export class AudioPreprocessor {
+  private readonly ffmpegPath: string;
+  private readonly tmpDir: string;
+  private readonly now: () => number;
+  private readonly run: NonNullable<AudioPreprocessorDeps['run']>;
+
+  constructor(deps: AudioPreprocessorDeps) {
+    this.ffmpegPath = deps.ffmpegPath;
+    this.tmpDir = deps.tmpDir;
+    this.now = deps.now ?? Date.now;
+    this.run = deps.run ?? runProcess;
+  }
+
+  async preprocess(inputPath: string, opts?: { signal?: AbortSignal }): Promise<string> {
+    await mkdir(this.tmpDir, { recursive: true });
+    const out = join(this.tmpDir, `${this.now()}.wav`);
+    await this.run(
+      this.ffmpegPath,
+      ['-y', '-i', inputPath, '-ar', '16000', '-ac', '1', '-f', 'wav', out],
+      { signal: opts?.signal },
+    );
+    return out;
+  }
+}
+```
+
+- [ ] **Step 5: Run, expect pass; commit**
+
+```bash
+npx vitest run src/main/whisper/ src/main/util/
+git add src/main/whisper/ src/main/util/
+git commit -m "feat(audio): subprocess helper + ffmpeg preprocessor"
+```
+
+---
+
+## Task 10: WhisperRunner
+
+**Files:**
+- Create: `src/main/whisper/whisper-runner.ts`
+- Test: `src/main/whisper/whisper-runner.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+import { describe, it, expect, vi } from 'vitest';
+import { WhisperRunner } from './whisper-runner';
+
+const fakeJson = JSON.stringify({
+  transcription: [
+    { offsets: { from: 0, to: 1500 }, text: ' Hello ' },
+    { offsets: { from: 1500, to: 3000 }, text: 'world.' },
+  ],
+});
+
+describe('WhisperRunner', () => {
+  it('invokes the binary with model + wav and parses JSON output', async () => {
+    const run = vi.fn().mockResolvedValue({ code: 0, stdout: fakeJson, stderr: '' });
+    const runner = new WhisperRunner({
+      whisperPath: '/bin/whisper',
+      modelPath: '/models/ggml-base.en.bin',
+      run,
+    });
+    const r = await runner.transcribe('/tmp/a.wav');
+    expect(r.text.trim()).toBe('Hello world.');
+    expect(r.segments).toHaveLength(2);
+    expect(r.durationMs).toBe(3000);
+
+    expect(run).toHaveBeenCalledWith(
+      '/bin/whisper',
+      expect.arrayContaining(['-m', '/models/ggml-base.en.bin', '-f', '/tmp/a.wav', '-ojf']),
+      expect.anything(),
+    );
+  });
+
+  it('honors language option', async () => {
+    const run = vi.fn().mockResolvedValue({ code: 0, stdout: fakeJson, stderr: '' });
+    const runner = new WhisperRunner({
+      whisperPath: '/bin/whisper',
+      modelPath: '/models/m.bin',
+      run,
+    });
+    await runner.transcribe('/tmp/a.wav', { language: 'es' });
+    expect(run.mock.calls[0][1]).toEqual(expect.arrayContaining(['-l', 'es']));
+  });
+
+  it('propagates failure', async () => {
+    const run = vi.fn().mockRejectedValue(new Error('boom'));
+    const runner = new WhisperRunner({
+      whisperPath: '/bin/whisper',
+      modelPath: '/models/m.bin',
+      run,
+    });
+    await expect(runner.transcribe('/tmp/a.wav')).rejects.toThrow(/boom/);
+  });
+});
+```
+
+- [ ] **Step 2: Implement `src/main/whisper/whisper-runner.ts`**
+
+Note: whisper.cpp's CLI emits JSON when invoked with `-ojf` (output JSON full). Confirm against the upstream `examples/cli/README.md` at the pinned tag during implementation; if the flag has changed, update the constants.
+
+```ts
+import { runProcess, type ProcessResult } from '../util/subprocess';
+
+export interface TranscriptSegment {
+  startMs: number;
+  endMs: number;
+  text: string;
+}
+
+export interface TranscriptResult {
+  text: string;
+  segments: TranscriptSegment[];
+  durationMs: number;
+}
+
+export interface WhisperRunnerDeps {
+  whisperPath: string;
+  modelPath: string;
+  run?: (cmd: string, args: string[], opts?: { signal?: AbortSignal }) => Promise<ProcessResult>;
+}
+
+interface WhisperJson {
+  transcription: Array<{
+    offsets: { from: number; to: number };
+    text: string;
+  }>;
+}
+
+export class WhisperRunner {
+  private readonly whisperPath: string;
+  private readonly modelPath: string;
+  private readonly run: NonNullable<WhisperRunnerDeps['run']>;
+
+  constructor(deps: WhisperRunnerDeps) {
+    this.whisperPath = deps.whisperPath;
+    this.modelPath = deps.modelPath;
+    this.run = deps.run ?? runProcess;
+  }
+
+  async transcribe(
+    wavPath: string,
+    opts?: { language?: string; signal?: AbortSignal },
+  ): Promise<TranscriptResult> {
+    const args = [
+      '-m', this.modelPath,
+      '-f', wavPath,
+      '-ojf',
+      '-nt',
+      ...(opts?.language ? ['-l', opts.language] : []),
+    ];
+    const { stdout } = await this.run(this.whisperPath, args, { signal: opts?.signal });
+    return parseWhisperJson(stdout);
+  }
+}
+
+function parseWhisperJson(raw: string): TranscriptResult {
+  const data = JSON.parse(raw) as WhisperJson;
+  const segments: TranscriptSegment[] = data.transcription.map((s) => ({
+    startMs: s.offsets.from,
+    endMs: s.offsets.to,
+    text: s.text.trim(),
+  }));
+  const text = segments.map((s) => s.text).join(' ').replace(/\s+/g, ' ').trim();
+  const durationMs = segments.length ? segments[segments.length - 1].endMs : 0;
+  return { text, segments, durationMs };
+}
+```
+
+- [ ] **Step 3: Run, expect pass; commit**
+
+```bash
+npx vitest run src/main/whisper/whisper-runner.test.ts
+git add src/main/whisper/whisper-runner.ts src/main/whisper/whisper-runner.test.ts
+git commit -m "feat(whisper): sidecar runner with JSON output parsing"
+```
+
+---
+
+## Task 11: WhisperModelManager (download + SHA-256 verify)
+
+**Files:**
+- Create: `src/main/whisper/model-manager.ts`
+- Test: `src/main/whisper/model-manager.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+import { describe, it, expect, vi } from 'vitest';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { WhisperModelManager } from './model-manager';
+
+function sha256(buf: Buffer): string {
+  return createHash('sha256').update(buf).digest('hex');
+}
+
+describe('WhisperModelManager', () => {
+  it('returns existing path when file exists and hash matches', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mm-'));
+    const path = join(dir, 'base.en.bin');
+    writeFileSync(path, 'hello');
+    const m = new WhisperModelManager({
+      dir,
+      registry: { 'base.en': { url: 'http://x/m.bin', sha256: sha256(Buffer.from('hello')) } },
+      fetch: vi.fn(),
+    });
+    const p = await m.ensure('base.en');
+    expect(p).toBe(path);
+  });
+
+  it('downloads when file is missing, verifies hash, returns path', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mm-'));
+    const body = Buffer.from('world');
+    const fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      body: {
+        async *[Symbol.asyncIterator]() {
+          yield body;
+        },
+      },
+    });
+    const m = new WhisperModelManager({
+      dir,
+      registry: { 'base.en': { url: 'http://x/m.bin', sha256: sha256(body) } },
+      fetch,
+    });
+    const p = await m.ensure('base.en');
+    expect(existsSync(p)).toBe(true);
+    expect(readFileSync(p)).toEqual(body);
+  });
+
+  it('rejects when downloaded hash does not match', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mm-'));
+    const body = Buffer.from('mismatch');
+    const fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      body: {
+        async *[Symbol.asyncIterator]() {
+          yield body;
+        },
+      },
+    });
+    const m = new WhisperModelManager({
+      dir,
+      registry: { 'base.en': { url: 'http://x/m.bin', sha256: 'deadbeef'.repeat(8) } },
+      fetch,
+    });
+    await expect(m.ensure('base.en')).rejects.toThrow(/sha256/i);
+  });
+});
+```
+
+- [ ] **Step 2: Implement `src/main/whisper/model-manager.ts`**
+
+```ts
+import { createHash } from 'node:crypto';
+import { createReadStream, createWriteStream, existsSync } from 'node:fs';
+import { mkdir, rename, unlink } from 'node:fs/promises';
+import { join } from 'node:path';
+
+export interface ModelEntry {
+  url: string;
+  sha256: string;
+}
+
+export type ModelRegistry = Record<string, ModelEntry>;
+
+type FetchLike = typeof fetch;
+
+export interface WhisperModelManagerDeps {
+  dir: string;
+  registry: ModelRegistry;
+  fetch?: FetchLike;
+  onProgress?: (key: string, bytes: number) => void;
+}
+
+export class WhisperModelManager {
+  private readonly dir: string;
+  private readonly registry: ModelRegistry;
+  private readonly fetch: FetchLike;
+  private readonly onProgress?: (key: string, bytes: number) => void;
+
+  constructor(deps: WhisperModelManagerDeps) {
+    this.dir = deps.dir;
+    this.registry = deps.registry;
+    this.fetch = deps.fetch ?? fetch;
+    this.onProgress = deps.onProgress;
+  }
+
+  async ensure(key: string): Promise<string> {
+    const entry = this.registry[key];
+    if (!entry) throw new Error(`Unknown model key: ${key}`);
+    const finalPath = join(this.dir, `${key}.bin`);
+    if (existsSync(finalPath) && (await fileSha256(finalPath)) === entry.sha256) return finalPath;
+    await this.download(key, entry, finalPath);
+    return finalPath;
+  }
+
+  private async download(key: string, entry: ModelEntry, dest: string): Promise<void> {
+    await mkdir(this.dir, { recursive: true });
+    const tmp = `${dest}.partial`;
+    const res = await this.fetch(entry.url);
+    if (!res.ok) throw new Error(`Model download failed: ${res.status}`);
+    if (!res.body) throw new Error('Model download produced no body');
+
+    await new Promise<void>(async (resolve, reject) => {
+      const out = createWriteStream(tmp);
+      let bytes = 0;
+      try {
+        for await (const chunk of res.body as unknown as AsyncIterable<Buffer>) {
+          bytes += chunk.length;
+          if (!out.write(chunk)) await new Promise((r) => out.once('drain', r));
+          this.onProgress?.(key, bytes);
+        }
+        out.end(resolve);
+      } catch (err) {
+        out.destroy();
+        reject(err);
+      }
+    });
+
+    const got = await fileSha256(tmp);
+    if (got !== entry.sha256) {
+      await unlink(tmp).catch(() => {});
+      throw new Error(`sha256 mismatch for ${key}: expected ${entry.sha256}, got ${got}`);
+    }
+    await rename(tmp, dest);
+  }
+}
+
+function fileSha256(path: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const h = createHash('sha256');
+    createReadStream(path)
+      .on('data', (d) => h.update(d))
+      .on('end', () => resolve(h.digest('hex')))
+      .on('error', reject);
+  });
+}
+```
+
+- [ ] **Step 3: Run, expect pass; commit**
+
+```bash
+npx vitest run src/main/whisper/model-manager.test.ts
+git add src/main/whisper/model-manager.ts src/main/whisper/model-manager.test.ts
+git commit -m "feat(whisper): model download with sha256 verification"
+```
+
+---
+
+## Task 12: Pipeline orchestrator
+
+**Files:**
+- Create: `src/main/pipeline.ts`
+- Test: `src/main/pipeline.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import Database from 'better-sqlite3';
+import { runMigrations } from './db/runner';
+import initSql from './db/migrations/001_init.sql?raw';
+import { NoteStore } from './db/store';
+import { Pipeline } from './pipeline';
+
+function freshStore(): NoteStore {
+  const db = new Database(':memory:');
+  runMigrations(db, [{ version: 1, sql: initSql }]);
+  return new NoteStore(db);
+}
+
+const baseSettings = () => ({
+  provider: 'anthropic' as const,
+  apiKey: 'k',
+  baseUrl: '',
+  model: 'claude-opus-4-7',
+  hotkeyEnabled: false,
+  hotkeyAccelerator: '',
+  keepAudioDefault: true,
+});
+
+describe('Pipeline', () => {
+  let store: NoteStore;
+  beforeEach(() => {
+    store = freshStore();
+  });
+
+  it('drives a note from transcribing → generating → ready and emits streaming events', async () => {
+    store.create({ id: 'n1', audioPath: '/tmp/a.webm', durationMs: 1000 });
+
+    const events: Array<{ type: string; payload: any }> = [];
+    const emit = (type: string, payload: any) => events.push({ type, payload });
+
+    const audio = { preprocess: vi.fn().mockResolvedValue('/tmp/a.wav') };
+    const whisper = {
+      transcribe: vi.fn().mockResolvedValue({ text: 'raw text', segments: [], durationMs: 1000 }),
+    };
+    const llm = {
+      streamNotes: async function* () {
+        yield { delta: '# Hi\n' };
+        yield { delta: '\nbody' };
+      },
+    };
+
+    const p = new Pipeline({
+      store,
+      audio: audio as any,
+      whisper: whisper as any,
+      makeLLMClient: () => llm as any,
+      settings: baseSettings,
+      emit,
+    });
+
+    await p.process('n1');
+
+    expect(audio.preprocess).toHaveBeenCalledWith('/tmp/a.webm', expect.anything());
+    expect(whisper.transcribe).toHaveBeenCalledWith('/tmp/a.wav', expect.anything());
+
+    const finalNote = store.get('n1')!;
+    expect(finalNote.status).toBe('ready');
+    expect(finalNote.transcript).toBe('raw text');
+    expect(finalNote.markdown).toBe('# Hi\n\nbody');
+    expect(finalNote.title).toBe('Hi');
+    expect(finalNote.modelUsed).toBe('claude-opus-4-7');
+    expect(finalNote.provider).toBe('anthropic');
+
+    const types = events.map((e) => e.type);
+    expect(types).toContain('note:streaming');
+    expect(types[types.length - 1]).toBe('note:updated');
+  });
+
+  it('marks transcription_failed when whisper throws', async () => {
+    store.create({ id: 'n1', audioPath: '/tmp/a.webm', durationMs: 1 });
+    const p = new Pipeline({
+      store,
+      audio: { preprocess: vi.fn().mockResolvedValue('/tmp/a.wav') } as any,
+      whisper: { transcribe: vi.fn().mockRejectedValue(new Error('whisper bad')) } as any,
+      makeLLMClient: () => ({ streamNotes: async function* () {} } as any),
+      settings: baseSettings,
+      emit: () => {},
+    });
+    await p.process('n1');
+    const note = store.get('n1')!;
+    expect(note.status).toBe('transcription_failed');
+    expect(note.errorMessage).toMatch(/whisper bad/);
+  });
+
+  it('marks generation_failed when llm throws and preserves transcript', async () => {
+    store.create({ id: 'n1', audioPath: '/tmp/a.webm', durationMs: 1 });
+    const p = new Pipeline({
+      store,
+      audio: { preprocess: vi.fn().mockResolvedValue('/tmp/a.wav') } as any,
+      whisper: { transcribe: vi.fn().mockResolvedValue({ text: 't', segments: [], durationMs: 0 }) } as any,
+      makeLLMClient: () => ({
+        streamNotes: async function* () {
+          throw new Error('llm bad');
+        },
+      } as any),
+      settings: baseSettings,
+      emit: () => {},
+    });
+    await p.process('n1');
+    const note = store.get('n1')!;
+    expect(note.status).toBe('generation_failed');
+    expect(note.transcript).toBe('t');
+    expect(note.errorMessage).toMatch(/llm bad/);
+  });
+});
+```
+
+- [ ] **Step 2: Implement `src/main/pipeline.ts`**
+
+```ts
+import type { NoteStore } from './db/store';
+import type { AudioPreprocessor } from './whisper/audio-preprocessor';
+import type { WhisperRunner } from './whisper/whisper-runner';
+import type { LLMClient } from './llm/client';
+import type { Settings } from './settings';
+
+export type PipelineEventType = 'note:streaming' | 'note:updated' | 'note:failed';
+
+export interface PipelineDeps {
+  store: NoteStore;
+  audio: AudioPreprocessor;
+  whisper: WhisperRunner;
+  makeLLMClient: (s: Settings) => LLMClient;
+  settings: () => Settings;
+  emit: (type: PipelineEventType, payload: { id: string; markdown?: string }) => void;
+}
+
+export class Pipeline {
+  constructor(private readonly deps: PipelineDeps) {}
+
+  async process(id: string, opts?: { signal?: AbortSignal }): Promise<void> {
+    const note = this.deps.store.get(id);
+    if (!note?.audioPath) {
+      this.deps.store.updateStatus(id, 'transcription_failed', 'audio not found');
+      this.deps.emit('note:failed', { id });
+      return;
+    }
+
+    let transcript: string;
+    try {
+      const wavPath = await this.deps.audio.preprocess(note.audioPath, { signal: opts?.signal });
+      const r = await this.deps.whisper.transcribe(wavPath, { signal: opts?.signal });
+      transcript = r.text;
+      this.deps.store.setTranscript(id, transcript);
+      this.deps.store.updateStatus(id, 'generating');
+      this.deps.emit('note:updated', { id });
+    } catch (err) {
+      this.deps.store.updateStatus(id, 'transcription_failed', errorMessage(err));
+      this.deps.emit('note:failed', { id });
+      return;
+    }
+
+    let buffer = '';
+    try {
+      const settings = this.deps.settings();
+      const client = this.deps.makeLLMClient(settings);
+      for await (const chunk of client.streamNotes(transcript, { signal: opts?.signal })) {
+        buffer += chunk.delta;
+        this.deps.emit('note:streaming', { id, markdown: buffer });
+      }
+      const title = extractTitle(buffer);
+      this.deps.store.setMarkdown(id, buffer, title, settings.model, settings.provider);
+      this.deps.emit('note:updated', { id });
+    } catch (err) {
+      this.deps.store.updateStatus(id, 'generation_failed', errorMessage(err));
+      this.deps.emit('note:failed', { id });
+    }
+  }
+}
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
+function extractTitle(markdown: string): string {
+  const match = markdown.match(/^#\s+(.+?)\s*$/m);
+  return match ? match[1].trim() : 'Untitled';
+}
+```
+
+- [ ] **Step 3: Run, expect pass; commit**
+
+```bash
+npx vitest run src/main/pipeline.test.ts
+git add src/main/pipeline.ts src/main/pipeline.test.ts
+git commit -m "feat(pipeline): orchestrate transcribe→llm with streaming events"
+```
+
+---
+
+## Task 13: Typed IPC bridge — full surface
+
+**Files:**
+- Modify: `src/shared/ipc.ts` (replace contents)
+- Modify: `src/preload/index.ts` (replace contents)
+
+- [ ] **Step 1: Replace `src/shared/ipc.ts`**
+
+```ts
+import type { Note, NoteSummary, NoteStatus } from '../main/db/store';
+import type { Settings } from '../main/settings';
+
+export const IpcChannels = {
+  AppPing: 'app:ping',
+  NotesCreate: 'notes:create',
+  NotesList: 'notes:list',
+  NotesGet: 'notes:get',
+  NotesUpdate: 'notes:update',
+  NotesDelete: 'notes:delete',
+  NotesDeleteAudio: 'notes:deleteAudio',
+  NotesRetry: 'notes:retry',
+  NotesEvent: 'notes:event',
+  SettingsGet: 'settings:get',
+  SettingsSet: 'settings:set',
+  HotkeyPressed: 'hotkey:pressed',
+} as const;
+
+export interface NotesEvent {
+  type: 'note:streaming' | 'note:updated' | 'note:failed';
+  payload: {
+    id: string;
+    markdown?: string;
+  };
+}
+
+export type Api = {
+  ping(): Promise<'pong'>;
+  notes: {
+    create(input: { audio: ArrayBuffer; durationMs: number }): Promise<{ id: string }>;
+    list(opts?: { search?: string; limit?: number }): Promise<NoteSummary[]>;
+    get(id: string): Promise<Note | null>;
+    update(id: string, markdown: string): Promise<void>;
+    delete(id: string): Promise<void>;
+    deleteAudio(id: string): Promise<void>;
+    retry(id: string): Promise<void>;
+    onEvent(cb: (e: NotesEvent) => void): () => void;
+  };
+  settings: {
+    get(): Promise<Settings>;
+    set(s: Settings): Promise<void>;
+  };
+  onHotkey(cb: () => void): () => void;
+};
+
+export type { Note, NoteSummary, NoteStatus, Settings };
+
+declare global {
+  interface Window {
+    api: Api;
+  }
+}
+```
+
+- [ ] **Step 2: Replace `src/preload/index.ts`**
+
+```ts
+import { contextBridge, ipcRenderer } from 'electron';
+import { IpcChannels, type Api, type NotesEvent } from '@shared/ipc';
+
+const api: Api = {
+  ping: () => ipcRenderer.invoke(IpcChannels.AppPing),
+  notes: {
+    create: (input) => ipcRenderer.invoke(IpcChannels.NotesCreate, input),
+    list: (opts) => ipcRenderer.invoke(IpcChannels.NotesList, opts),
+    get: (id) => ipcRenderer.invoke(IpcChannels.NotesGet, id),
+    update: (id, markdown) => ipcRenderer.invoke(IpcChannels.NotesUpdate, { id, markdown }),
+    delete: (id) => ipcRenderer.invoke(IpcChannels.NotesDelete, id),
+    deleteAudio: (id) => ipcRenderer.invoke(IpcChannels.NotesDeleteAudio, id),
+    retry: (id) => ipcRenderer.invoke(IpcChannels.NotesRetry, id),
+    onEvent: (cb) => {
+      const listener = (_: unknown, e: NotesEvent) => cb(e);
+      ipcRenderer.on(IpcChannels.NotesEvent, listener);
+      return () => ipcRenderer.off(IpcChannels.NotesEvent, listener);
+    },
+  },
+  settings: {
+    get: () => ipcRenderer.invoke(IpcChannels.SettingsGet),
+    set: (s) => ipcRenderer.invoke(IpcChannels.SettingsSet, s),
+  },
+  onHotkey: (cb) => {
+    const listener = () => cb();
+    ipcRenderer.on(IpcChannels.HotkeyPressed, listener);
+    return () => ipcRenderer.off(IpcChannels.HotkeyPressed, listener);
+  },
+};
+
+contextBridge.exposeInMainWorld('api', api);
+```
+
+- [ ] **Step 3: Verify typecheck**
+
+```bash
+npm run typecheck
+```
+
+Expected: passes (some unused imports will warn — that's fine for now; main wires them in Task 14).
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/shared/ipc.ts src/preload/index.ts
+git commit -m "feat(ipc): typed bridge for notes + settings + hotkey"
+```
+
+---
+
+## Task 14: Main wiring — services, IPC handlers, recovery
+
+**Files:**
+- Create: `src/main/paths.ts`
+- Create: `src/main/whisper/registry.ts`
+- Create: `src/main/services.ts`
+- Create: `src/main/ipc-handlers.ts`
+- Modify: `src/main/index.ts` (replace contents)
+
+- [ ] **Step 1: Create `src/main/paths.ts`**
+
+```ts
+import { app } from 'electron';
+import { join } from 'node:path';
+
+export function userDataPath(...segments: string[]): string {
+  return join(app.getPath('userData'), ...segments);
+}
+
+export function resourcePath(...segments: string[]): string {
+  if (app.isPackaged) return join(process.resourcesPath, ...segments);
+  return join(__dirname, '..', '..', ...segments);
+}
+
+export function platformBinaryDir(): string {
+  const platform = process.platform;
+  const arch = process.arch;
+  const map: Record<string, string> = {
+    'darwin-arm64': 'mac-arm64',
+    'darwin-x64': 'mac-x64',
+    'win32-x64': 'win-x64',
+    'linux-x64': 'linux-x64',
+  };
+  const key = `${platform}-${arch}`;
+  const folder = map[key];
+  if (!folder) throw new Error(`Unsupported platform: ${key}`);
+  return resourcePath('resources', 'bin', folder);
+}
+```
+
+- [ ] **Step 2: Create `src/main/whisper/registry.ts`**
+
+```ts
+import type { ModelRegistry } from './model-manager';
+
+// Source: https://huggingface.co/ggerganov/whisper.cpp
+// IMPORTANT: replace REPLACE_WITH_VERIFIED_SHA256 with the upstream-verified
+// sha256 before running. The registry is intentionally bake-time data.
+export const MODEL_REGISTRY: ModelRegistry = {
+  'base.en': {
+    url: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin',
+    sha256: 'REPLACE_WITH_VERIFIED_SHA256',
+  },
+};
+
+export const DEFAULT_MODEL_KEY = 'base.en';
+```
+
+- [ ] **Step 3: Create `src/main/ipc-handlers.ts`**
+
+```ts
+import { ipcMain, BrowserWindow } from 'electron';
+import { mkdir, writeFile, unlink } from 'node:fs/promises';
+import { join } from 'node:path';
+import { v4 as uuidv4 } from 'uuid';
+import { IpcChannels, type NotesEvent } from '@shared/ipc';
+import type { NoteStore } from './db/store';
+import type { SettingsStore } from './settings';
+import type { Pipeline } from './pipeline';
+
+export interface IpcHandlerDeps {
+  store: NoteStore;
+  settings: SettingsStore;
+  pipeline: Pipeline;
+  audioDir: string;
+  windows: () => BrowserWindow[];
+}
+
+export function registerIpcHandlers(deps: IpcHandlerDeps): {
+  broadcastNotesEvent: (e: NotesEvent) => void;
+} {
+  const broadcastNotesEvent = (event: NotesEvent) => {
+    for (const w of deps.windows()) w.webContents.send(IpcChannels.NotesEvent, event);
+  };
+
+  ipcMain.handle(IpcChannels.AppPing, () => 'pong' as const);
+
+  ipcMain.handle(IpcChannels.NotesCreate, async (_e, input: { audio: ArrayBuffer; durationMs: number }) => {
+    const id = uuidv4();
+    await mkdir(deps.audioDir, { recursive: true });
+    const path = join(deps.audioDir, `${id}.webm`);
+    await writeFile(path, Buffer.from(input.audio));
+    deps.store.create({ id, audioPath: path, durationMs: input.durationMs });
+    void deps.pipeline.process(id);
+    return { id };
+  });
+
+  ipcMain.handle(IpcChannels.NotesList, (_e, opts?: { search?: string; limit?: number }) =>
+    deps.store.list(opts),
+  );
+
+  ipcMain.handle(IpcChannels.NotesGet, (_e, id: string) => deps.store.get(id) ?? null);
+
+  ipcMain.handle(IpcChannels.NotesUpdate, (_e, args: { id: string; markdown: string }) => {
+    const title = (args.markdown.match(/^#\s+(.+?)\s*$/m)?.[1] ?? 'Untitled').trim();
+    deps.store.updateMarkdown(args.id, args.markdown, title);
+  });
+
+  ipcMain.handle(IpcChannels.NotesDelete, async (_e, id: string) => {
+    const note = deps.store.get(id);
+    if (note?.audioPath) await unlink(note.audioPath).catch(() => {});
+    deps.store.delete(id);
+  });
+
+  ipcMain.handle(IpcChannels.NotesDeleteAudio, async (_e, id: string) => {
+    const note = deps.store.get(id);
+    if (note?.audioPath) await unlink(note.audioPath).catch(() => {});
+    deps.store.deleteAudio(id);
+  });
+
+  ipcMain.handle(IpcChannels.NotesRetry, async (_e, id: string) => {
+    void deps.pipeline.process(id);
+  });
+
+  ipcMain.handle(IpcChannels.SettingsGet, () => deps.settings.read());
+  ipcMain.handle(IpcChannels.SettingsSet, (_e, s) => deps.settings.write(s));
+
+  return { broadcastNotesEvent };
+}
+```
+
+- [ ] **Step 4: Create `src/main/services.ts`**
+
+```ts
+import { safeStorage, BrowserWindow } from 'electron';
+import { join } from 'node:path';
+import { openDatabase } from './db';
+import { NoteStore } from './db/store';
+import { SettingsStore, type Settings } from './settings';
+import { AudioPreprocessor } from './whisper/audio-preprocessor';
+import { WhisperRunner } from './whisper/whisper-runner';
+import { WhisperModelManager } from './whisper/model-manager';
+import { MODEL_REGISTRY, DEFAULT_MODEL_KEY } from './whisper/registry';
+import { Pipeline } from './pipeline';
+import { createLLMClient } from './llm/factory';
+import type { LLMClient } from './llm/client';
+import { platformBinaryDir, userDataPath } from './paths';
+import { registerIpcHandlers } from './ipc-handlers';
+import { IpcChannels } from '@shared/ipc';
+
+export interface Services {
+  store: NoteStore;
+  settings: SettingsStore;
+  pipeline: Pipeline;
+  audioDir: string;
+}
+
+export async function createServices(getWindows: () => BrowserWindow[]): Promise<Services> {
+  const dbPath = userDataPath('app.db');
+  const db = openDatabase(dbPath);
+
+  const store = new NoteStore(db);
+  const settings = new SettingsStore(db, safeStorage);
+
+  const binDir = platformBinaryDir();
+  const ext = process.platform === 'win32' ? '.exe' : '';
+  const ffmpegPath = join(binDir, `ffmpeg${ext}`);
+  const whisperPath = join(binDir, `whisper${ext}`);
+
+  const modelManager = new WhisperModelManager({
+    dir: userDataPath('models'),
+    registry: MODEL_REGISTRY,
+    onProgress: (key, bytes) => {
+      for (const w of getWindows()) {
+        w.webContents.send('model:progress', { key, bytes });
+      }
+    },
+  });
+
+  const modelPath = await modelManager.ensure(DEFAULT_MODEL_KEY);
+
+  const audio = new AudioPreprocessor({
+    ffmpegPath,
+    tmpDir: userDataPath('tmp'),
+  });
+  const whisper = new WhisperRunner({ whisperPath, modelPath });
+
+  // Forward declare so Pipeline.emit can reach the broadcaster after handlers register.
+  let broadcast: (e: { type: 'note:streaming' | 'note:updated' | 'note:failed'; payload: { id: string; markdown?: string } }) => void = () => {};
+
+  const makeLLMClient = (s: Settings): LLMClient => {
+    if (process.env['VOICE_NOTES_LLM_FAKE'] === '1') {
+      return {
+        async *streamNotes() {
+          yield { delta: '# Test note\n\nGenerated by E2E.' };
+        },
+      };
+    }
+    return createLLMClient(s);
+  };
+
+  const pipeline = new Pipeline({
+    store,
+    audio,
+    whisper,
+    makeLLMClient,
+    settings: () => settings.read(),
+    emit: (type, payload) => broadcast({ type, payload }),
+  });
+
+  const audioDir = userDataPath('audio');
+
+  const handlers = registerIpcHandlers({
+    store,
+    settings,
+    pipeline,
+    audioDir,
+    windows: getWindows,
+  });
+  broadcast = handlers.broadcastNotesEvent;
+
+  return { store, settings, pipeline, audioDir };
+}
+```
+
+- [ ] **Step 5: Replace `src/main/index.ts`**
+
+```ts
+import { app, BrowserWindow, session } from 'electron';
+import { join } from 'node:path';
+import { createServices, type Services } from './services';
+
+const isDev = !app.isPackaged;
+
+async function createMainWindow(): Promise<BrowserWindow> {
+  const win = new BrowserWindow({
+    width: 1100,
+    height: 720,
+    minWidth: 720,
+    minHeight: 480,
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  if (isDev && process.env['ELECTRON_RENDERER_URL']) {
+    win.loadURL(process.env['ELECTRON_RENDERER_URL']);
+  } else {
+    win.loadFile(join(__dirname, '../renderer/index.html'));
+  }
+  return win;
+}
+
+async function recoverInterrupted(services: Services): Promise<void> {
+  const interrupted = services.store
+    .list({ limit: 1000 })
+    .filter((n) => n.status === 'transcribing' || n.status === 'generating');
+  for (const n of interrupted) {
+    services.store.updateStatus(
+      n.id,
+      n.status === 'transcribing' ? 'transcription_failed' : 'generation_failed',
+      'Interrupted by app restart',
+    );
+  }
+}
+
+app.whenReady().then(async () => {
+  session.defaultSession.webRequest.onHeadersReceived((details, cb) => {
+    cb({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Content-Security-Policy': [
+          "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https:; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:;",
+        ],
+      },
+    });
+  });
+
+  const services = await createServices(() => BrowserWindow.getAllWindows());
+  await recoverInterrupted(services);
+
+  await createMainWindow();
+
+  app.on('activate', async () => {
+    if (BrowserWindow.getAllWindows().length === 0) await createMainWindow();
+  });
+});
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});
+```
+
+- [ ] **Step 6: Verify boot**
+
+```bash
+npm run typecheck
+npm run dev
+```
+
+Expected: app boots; renderer still shows the simple ping page (UI updates next task). Note: model download will run on first start — if the registry SHA placeholder is unfilled, the app will throw during `modelManager.ensure`. Replace the placeholder before running, or stub `MODEL_REGISTRY` with a model you have already cached.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/main/
+git commit -m "feat(main): wire services, IPC handlers, recovery"
+```
+
+---
+
+## Task 15: Renderer scaffolding — layout, sidebar, router
+
+**Files:**
+- Create: `src/renderer/lib/api.ts`
+- Create: `src/renderer/lib/format.ts`
+- Test: `src/renderer/lib/format.test.ts`
+- Modify: `src/renderer/App.tsx`
+- Create: `src/renderer/styles.css`
+- Create: `src/renderer/components/Layout.tsx`
+- Create: `src/renderer/components/Sidebar.tsx`
+- Create: `src/renderer/components/Recorder.tsx`
+- Create: `src/renderer/pages/ListPage.tsx`
+- Create: `src/renderer/pages/DetailPage.tsx` (placeholder; full impl in Task 17)
+- Create: `src/renderer/pages/SettingsPage.tsx` (placeholder; full impl in Task 18)
+
+- [ ] **Step 1: Create `src/renderer/lib/api.ts`**
+
+```ts
+export const api = window.api;
+export type { Api, Note, NoteSummary, NoteStatus, Settings, NotesEvent } from '@shared/ipc';
+```
+
+- [ ] **Step 2: Create `src/renderer/lib/format.ts` and its test**
+
+```ts
+export function formatRelativeTime(epochMs: number, now: number = Date.now()): string {
+  const diff = now - epochMs;
+  const sec = Math.round(diff / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.round(hr / 24);
+  return `${day}d ago`;
+}
+
+export function formatDuration(ms: number): string {
+  const total = Math.round(ms / 1000);
+  const mm = Math.floor(total / 60).toString().padStart(2, '0');
+  const ss = (total % 60).toString().padStart(2, '0');
+  return `${mm}:${ss}`;
+}
+```
+
+`src/renderer/lib/format.test.ts`:
+
+```ts
+import { describe, it, expect } from 'vitest';
+import { formatRelativeTime, formatDuration } from './format';
+
+describe('formatRelativeTime', () => {
+  it('formats seconds, minutes, hours, days', () => {
+    const now = 100_000_000;
+    expect(formatRelativeTime(now - 5_000, now)).toBe('5s ago');
+    expect(formatRelativeTime(now - 90_000, now)).toBe('2m ago');
+    expect(formatRelativeTime(now - 3_600_000, now)).toBe('1h ago');
+    expect(formatRelativeTime(now - 86_400_000 * 3, now)).toBe('3d ago');
+  });
+});
+
+describe('formatDuration', () => {
+  it('zero-pads mm:ss', () => {
+    expect(formatDuration(0)).toBe('00:00');
+    expect(formatDuration(65_000)).toBe('01:05');
+  });
+});
+```
+
+```bash
+npx vitest run src/renderer/lib/format.test.ts
+```
+
+Expected: pass.
+
+- [ ] **Step 3: Create `src/renderer/styles.css`**
+
+```css
+:root {
+  --bg: #fafaf7;
+  --fg: #1c1c1a;
+  --muted: #6b6b6b;
+  --accent: #b14a3c;
+  --border: #e6e3da;
+  --panel: #ffffff;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--fg); }
+button { font: inherit; cursor: pointer; border-radius: 6px; padding: 6px 12px; border: 1px solid var(--border); background: var(--panel); }
+button:hover { background: #f1efe8; }
+button.primary { background: var(--accent); color: white; border-color: var(--accent); }
+input, textarea { font: inherit; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border); width: 100%; background: var(--panel); color: var(--fg); }
+.layout { display: grid; grid-template-columns: 320px 1fr; height: 100%; }
+.sidebar { border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+.sidebar-header { padding: 12px; display: flex; gap: 8px; align-items: center; border-bottom: 1px solid var(--border); }
+.notes-list { overflow-y: auto; flex: 1; }
+.note-item { padding: 12px; border-bottom: 1px solid var(--border); cursor: pointer; display: block; color: inherit; text-decoration: none; }
+.note-item.active { background: #f1efe8; }
+.note-item .title { font-weight: 600; }
+.note-item .meta { color: var(--muted); font-size: 12px; margin-top: 4px; display: flex; gap: 8px; }
+.main-pane { padding: 24px; overflow-y: auto; }
+.toolbar { display: flex; gap: 8px; margin-bottom: 16px; align-items: center; }
+.toolbar .spacer { flex: 1; }
+.editor { width: 100%; min-height: 60vh; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.55; }
+```
+
+- [ ] **Step 4: Create `src/renderer/components/Layout.tsx`**
+
+```tsx
+import type { ReactNode } from 'react';
+
+interface LayoutProps {
+  sidebar: ReactNode;
+  children: ReactNode;
+}
+
+export function Layout({ sidebar, children }: LayoutProps) {
+  return (
+    <div className="layout">
+      <aside className="sidebar">{sidebar}</aside>
+      <section className="main-pane">{children}</section>
+    </div>
+  );
+}
+```
+
+- [ ] **Step 5: Create `src/renderer/components/Recorder.tsx`**
+
+```tsx
+import { useEffect, useRef, useState } from 'react';
+import { api } from '../lib/api';
+
+interface RecorderProps {
+  onCreated: (id: string) => void;
+}
+
+export function Recorder({ onCreated }: RecorderProps) {
+  const [recording, setRecording] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const startTsRef = useRef<number>(0);
+
+  async function start() {
+    setError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mr = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+      chunksRef.current = [];
+      mr.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+      mr.onstop = async () => {
+        try {
+          const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+          const buf = await blob.arrayBuffer();
+          const durationMs = Date.now() - startTsRef.current;
+          const { id } = await api.notes.create({ audio: buf, durationMs });
+          onCreated(id);
+        } catch (err) {
+          setError(err instanceof Error ? err.message : 'Failed to save recording');
+        } finally {
+          stream.getTracks().forEach((t) => t.stop());
+        }
+      };
+      startTsRef.current = Date.now();
+      mr.start();
+      recorderRef.current = mr;
+      setRecording(true);
+    } catch (err) {
+      if ((err as DOMException)?.name === 'NotAllowedError') {
+        setError('Microphone access denied. Grant access in your OS settings.');
+      } else {
+        setError(err instanceof Error ? err.message : 'Could not access microphone');
+      }
+    }
+  }
+
+  function stop() {
+    recorderRef.current?.stop();
+    recorderRef.current = null;
+    setRecording(false);
+  }
+
+  useEffect(() => {
+    const unsub = api.onHotkey(() => {
+      if (recording) stop(); else start();
+    });
+    return unsub;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recording]);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <button
+        className={recording ? '' : 'primary'}
+        onClick={recording ? stop : start}
+        title={recording ? 'Stop recording' : 'Start recording'}
+      >
+        {recording ? '◼ Stop' : '● Record'}
+      </button>
+      {error && <small style={{ color: 'var(--accent)' }}>{error}</small>}
+    </div>
+  );
+}
+```
+
+- [ ] **Step 6: Create `src/renderer/components/Sidebar.tsx`**
+
+```tsx
+import { useEffect, useState } from 'react';
+import { api } from '../lib/api';
+import type { NoteSummary } from '../lib/api';
+import { formatRelativeTime, formatDuration } from '../lib/format';
+import { Recorder } from './Recorder';
+
+interface SidebarProps {
+  selectedId: string | null;
+}
+
+export function Sidebar({ selectedId }: SidebarProps) {
+  const [search, setSearch] = useState('');
+  const [notes, setNotes] = useState<NoteSummary[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => api.notes.list({ search }).then((r) => { if (!cancelled) setNotes(r); });
+    refresh();
+    const unsub = api.notes.onEvent(() => refresh());
+    return () => {
+      cancelled = true;
+      unsub();
+    };
+  }, [search]);
+
+  return (
+    <>
+      <div className="sidebar-header">
+        <Recorder onCreated={(id) => { window.location.hash = `#/notes/${id}`; }} />
+        <input
+          placeholder="Search…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          aria-label="Search notes"
+        />
+        <button onClick={() => { window.location.hash = '#/settings'; }} aria-label="Settings">⚙︎</button>
+      </div>
+      <div className="notes-list">
+        {notes.map((n) => (
+          <a
+            key={n.id}
+            href={`#/notes/${n.id}`}
+            className={`note-item ${selectedId === n.id ? 'active' : ''}`}
+          >
+            <div className="title">{n.title || (n.status === 'ready' ? 'Untitled' : statusLabel(n.status))}</div>
+            <div className="meta">
+              <span>{formatRelativeTime(n.createdAt)}</span>
+              <span>{formatDuration(n.durationMs)}</span>
+            </div>
+          </a>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function statusLabel(s: NoteSummary['status']): string {
+  switch (s) {
+    case 'transcribing': return 'Transcribing…';
+    case 'generating': return 'Generating notes…';
+    case 'transcription_failed': return 'Transcription failed';
+    case 'generation_failed': return 'Note generation failed';
+    case 'pending_network': return 'Waiting for network…';
+    default: return '';
+  }
+}
+```
+
+- [ ] **Step 7: Create page placeholders**
+
+`src/renderer/pages/ListPage.tsx`:
+
+```tsx
+export function ListPage() {
+  return (
+    <div>
+      <h2>Voice Notes</h2>
+      <p>Pick a note from the sidebar, or hit record to start.</p>
+    </div>
+  );
+}
+```
+
+`src/renderer/pages/DetailPage.tsx`:
+
+```tsx
+export function DetailPage(_: { id: string }) {
+  return <p>Loading note…</p>;
+}
+```
+
+`src/renderer/pages/SettingsPage.tsx`:
+
+```tsx
+export function SettingsPage() {
+  return <p>Settings…</p>;
+}
+```
+
+- [ ] **Step 8: Replace `src/renderer/App.tsx`**
+
+```tsx
+import { useEffect, useState } from 'react';
+import './styles.css';
+import { ListPage } from './pages/ListPage';
+import { DetailPage } from './pages/DetailPage';
+import { SettingsPage } from './pages/SettingsPage';
+import { Sidebar } from './components/Sidebar';
+import { Layout } from './components/Layout';
+
+type Route = { name: 'list' } | { name: 'detail'; id: string } | { name: 'settings' };
+
+function parseHash(): Route {
+  const hash = window.location.hash.replace(/^#/, '');
+  if (hash.startsWith('/notes/')) return { name: 'detail', id: hash.slice('/notes/'.length) };
+  if (hash === '/settings') return { name: 'settings' };
+  return { name: 'list' };
+}
+
+export default function App() {
+  const [route, setRoute] = useState<Route>(parseHash);
+
+  useEffect(() => {
+    const onHash = () => setRoute(parseHash());
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
+  return (
+    <Layout sidebar={<Sidebar selectedId={route.name === 'detail' ? route.id : null} />}>
+      {route.name === 'list' && <ListPage />}
+      {route.name === 'detail' && <DetailPage id={route.id} />}
+      {route.name === 'settings' && <SettingsPage />}
+    </Layout>
+  );
+}
+```
+
+- [ ] **Step 9: Verify boot**
+
+```bash
+npm run dev
+```
+
+Expected: window opens with sidebar (Record button, search box, settings cog) and a placeholder main pane. Detail and Settings show "Loading…" / "Settings…" placeholders.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add src/renderer/
+git commit -m "feat(ui): scaffold layout, sidebar, recorder, hash router"
+```
+
+---
+
+## Task 16: DetailPage with streaming + edit
+
+**Files:**
+- Modify: `src/renderer/pages/DetailPage.tsx`
+
+- [ ] **Step 1: Implement DetailPage**
+
+```tsx
+import { useEffect, useRef, useState } from 'react';
+import { api } from '../lib/api';
+import type { Note } from '../lib/api';
+
+interface DetailPageProps {
+  id: string;
+}
+
+export function DetailPage({ id }: DetailPageProps) {
+  const [note, setNote] = useState<Note | null>(null);
+  const [streaming, setStreaming] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.notes.get(id).then((n) => {
+      if (cancelled) return;
+      setNote(n);
+      setDraft(n?.markdown ?? '');
+    });
+    const unsub = api.notes.onEvent((e) => {
+      if (e.payload.id !== id) return;
+      if (e.type === 'note:streaming' && e.payload.markdown) {
+        setStreaming(e.payload.markdown);
+      } else {
+        setStreaming(null);
+        api.notes.get(id).then((n) => {
+          if (cancelled) return;
+          setNote(n);
+          if (!editing && n) setDraft(n.markdown);
+        });
+      }
+    });
+    return () => {
+      cancelled = true;
+      unsub();
+    };
+  }, [id, editing]);
+
+  function onChange(next: string) {
+    setDraft(next);
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      api.notes.update(id, next);
+    }, 500);
+  }
+
+  if (!note) return <p>Loading…</p>;
+
+  return (
+    <div>
+      <div className="toolbar">
+        <strong>{note.title || 'Untitled'}</strong>
+        <div className="spacer" />
+        {note.status === 'ready' && (
+          <button onClick={() => setEditing((v) => !v)}>{editing ? 'Done' : 'Edit'}</button>
+        )}
+        {(note.status === 'transcription_failed' || note.status === 'generation_failed') && (
+          <button onClick={() => api.notes.retry(id)}>Retry</button>
+        )}
+        <button
+          onClick={async () => {
+            if (!confirm('Delete this note?')) return;
+            await api.notes.delete(id);
+            window.location.hash = '#/';
+          }}
+        >
+          Delete
+        </button>
+      </div>
+
+      {note.status !== 'ready' && (
+        <p style={{ color: 'var(--muted)' }}>
+          Status: {note.status}
+          {note.errorMessage ? ` — ${note.errorMessage}` : null}
+        </p>
+      )}
+
+      {note.status === 'generating' && streaming ? (
+        <pre style={{ whiteSpace: 'pre-wrap', font: 'inherit' }}>{streaming}</pre>
+      ) : editing ? (
+        <textarea className="editor" value={draft} onChange={(e) => onChange(e.target.value)} />
+      ) : (
+        <pre style={{ whiteSpace: 'pre-wrap', font: 'inherit' }}>{note.markdown || ''}</pre>
+      )}
+
+      {note.transcript && (
+        <details style={{ marginTop: 24 }}>
+          <summary style={{ color: 'var(--muted)' }}>Show raw transcript</summary>
+          <pre style={{ whiteSpace: 'pre-wrap' }}>{note.transcript}</pre>
+        </details>
+      )}
+
+      {note.audioPath && (
+        <div style={{ marginTop: 16 }}>
+          <button onClick={async () => {
+            await api.notes.deleteAudio(id);
+            const fresh = await api.notes.get(id);
+            setNote(fresh);
+          }}>
+            Delete audio file
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+- [ ] **Step 2: Verify in dev** (requires Settings to be filled — Task 17 next, then come back and smoke-test).
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/renderer/pages/DetailPage.tsx
+git commit -m "feat(ui): note detail with streaming display, edit, retry, delete"
+```
+
+---
+
+## Task 17: SettingsPage
+
+**Files:**
+- Modify: `src/renderer/pages/SettingsPage.tsx`
+
+- [ ] **Step 1: Implement SettingsPage**
+
+```tsx
+import { useEffect, useState } from 'react';
+import { api } from '../lib/api';
+import type { Settings } from '../lib/api';
+
+const PROVIDER_DEFAULTS: Record<Settings['provider'], { baseUrl: string; modelHint: string }> = {
+  anthropic: { baseUrl: '', modelHint: 'claude-opus-4-7' },
+  openrouter: { baseUrl: 'https://openrouter.ai/api/v1', modelHint: 'anthropic/claude-opus-4-7' },
+  custom: { baseUrl: '', modelHint: 'e.g. llama3.2 (Ollama) or gpt-4o-mini' },
+};
+
+export function SettingsPage() {
+  const [s, setS] = useState<Settings | null>(null);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+
+  useEffect(() => {
+    api.settings.get().then(setS);
+  }, []);
+
+  if (!s) return <p>Loading…</p>;
+
+  function update<K extends keyof Settings>(k: K, v: Settings[K]) {
+    setS((prev) => (prev ? { ...prev, [k]: v } : prev));
+  }
+
+  async function save() {
+    if (!s) return;
+    await api.settings.set(s);
+    setSavedAt(Date.now());
+  }
+
+  return (
+    <div style={{ maxWidth: 640 }}>
+      <div className="toolbar">
+        <h2 style={{ margin: 0 }}>Settings</h2>
+        <div className="spacer" />
+        <a href="#/">Back</a>
+      </div>
+
+      <fieldset style={{ border: 'none', padding: 0, margin: 0 }}>
+        <legend>LLM Provider</legend>
+        <div style={{ display: 'flex', gap: 16, marginBottom: 12 }}>
+          {(['anthropic', 'openrouter', 'custom'] as const).map((p) => (
+            <label key={p}>
+              <input
+                type="radio"
+                name="provider"
+                checked={s.provider === p}
+                onChange={() => {
+                  update('provider', p);
+                  update('baseUrl', PROVIDER_DEFAULTS[p].baseUrl);
+                }}
+              />{' '}
+              {p}
+            </label>
+          ))}
+        </div>
+
+        <label>
+          API Key
+          <input
+            type="password"
+            value={s.apiKey}
+            onChange={(e) => update('apiKey', e.target.value)}
+            placeholder="sk-…"
+          />
+        </label>
+
+        <label style={{ marginTop: 8, display: 'block' }}>
+          Base URL
+          <input
+            value={s.baseUrl}
+            onChange={(e) => update('baseUrl', e.target.value)}
+            placeholder={PROVIDER_DEFAULTS[s.provider].baseUrl || 'SDK default'}
+            disabled={s.provider === 'anthropic'}
+          />
+        </label>
+
+        <label style={{ marginTop: 8, display: 'block' }}>
+          Model
+          <input
+            value={s.model}
+            onChange={(e) => update('model', e.target.value)}
+            placeholder={PROVIDER_DEFAULTS[s.provider].modelHint}
+          />
+        </label>
+      </fieldset>
+
+      <fieldset style={{ border: 'none', padding: 0, marginTop: 24 }}>
+        <legend>Recording</legend>
+        <label>
+          <input
+            type="checkbox"
+            checked={s.hotkeyEnabled}
+            onChange={(e) => update('hotkeyEnabled', e.target.checked)}
+          />{' '}
+          Enable global hotkey
+        </label>
+        <label style={{ display: 'block', marginTop: 8 }}>
+          Hotkey
+          <input
+            value={s.hotkeyAccelerator}
+            onChange={(e) => update('hotkeyAccelerator', e.target.value)}
+            disabled={!s.hotkeyEnabled}
+            placeholder="CommandOrControl+Shift+N"
+          />
+        </label>
+        <label style={{ display: 'block', marginTop: 8 }}>
+          <input
+            type="checkbox"
+            checked={s.keepAudioDefault}
+            onChange={(e) => update('keepAudioDefault', e.target.checked)}
+          />{' '}
+          Keep audio files by default (you can delete per-note)
+        </label>
+      </fieldset>
+
+      <div style={{ marginTop: 24 }}>
+        <button className="primary" onClick={save}>Save</button>
+        {savedAt && <small style={{ marginLeft: 8, color: 'var(--muted)' }}>Saved.</small>}
+      </div>
+    </div>
+  );
+}
+```
+
+- [ ] **Step 2: Verify in dev — set provider + key, save, reload, key persists**
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/renderer/pages/SettingsPage.tsx
+git commit -m "feat(ui): settings page for provider, key, hotkey"
+```
+
+---
+
+## Task 18: HotkeyManager + main wiring
+
+**Files:**
+- Create: `src/main/hotkey.ts`
+- Test: `src/main/hotkey.test.ts`
+- Modify: `src/main/services.ts` (construct + apply HotkeyManager; re-apply on settings change)
+- Modify: `src/main/index.ts` (unregisterAll on quit)
+
+- [ ] **Step 1: Test the manager**
+
+`src/main/hotkey.test.ts`:
+
+```ts
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { HotkeyManager } from './hotkey';
+
+function fakeShortcut() {
+  const registry = new Map<string, () => void>();
+  return {
+    registry,
+    api: {
+      register: vi.fn((accel: string, cb: () => void) => {
+        registry.set(accel, cb);
+        return true;
+      }),
+      unregister: vi.fn((accel: string) => registry.delete(accel)),
+      unregisterAll: vi.fn(() => registry.clear()),
+      isRegistered: vi.fn((accel: string) => registry.has(accel)),
+    },
+  };
+}
+
+describe('HotkeyManager', () => {
+  let onPress: () => void;
+  beforeEach(() => { onPress = vi.fn(); });
+
+  it('registers when enabled', () => {
+    const f = fakeShortcut();
+    const m = new HotkeyManager({ globalShortcut: f.api as any, onPress: () => onPress() });
+    const ok = m.apply({ enabled: true, accelerator: 'CommandOrControl+Shift+N' });
+    expect(ok).toBe(true);
+    expect(f.registry.has('CommandOrControl+Shift+N')).toBe(true);
+  });
+
+  it('unregisters previous when accelerator changes', () => {
+    const f = fakeShortcut();
+    const m = new HotkeyManager({ globalShortcut: f.api as any, onPress: () => onPress() });
+    m.apply({ enabled: true, accelerator: 'CommandOrControl+Shift+N' });
+    m.apply({ enabled: true, accelerator: 'CommandOrControl+Alt+R' });
+    expect(f.registry.has('CommandOrControl+Shift+N')).toBe(false);
+    expect(f.registry.has('CommandOrControl+Alt+R')).toBe(true);
+  });
+
+  it('clears all when disabled', () => {
+    const f = fakeShortcut();
+    const m = new HotkeyManager({ globalShortcut: f.api as any, onPress: () => onPress() });
+    m.apply({ enabled: true, accelerator: 'CommandOrControl+Shift+N' });
+    m.apply({ enabled: false, accelerator: 'CommandOrControl+Shift+N' });
+    expect(f.registry.size).toBe(0);
+  });
+
+  it('returns false on registration conflict', () => {
+    const f = fakeShortcut();
+    f.api.register = vi.fn(() => false) as any;
+    const m = new HotkeyManager({ globalShortcut: f.api as any, onPress: () => onPress() });
+    expect(m.apply({ enabled: true, accelerator: 'CommandOrControl+Shift+N' })).toBe(false);
+  });
+});
+```
+
+- [ ] **Step 2: Implement `src/main/hotkey.ts`**
+
+```ts
+import type { globalShortcut as GlobalShortcut } from 'electron';
+
+type GlobalShortcutLike = Pick<typeof GlobalShortcut, 'register' | 'unregister' | 'unregisterAll' | 'isRegistered'>;
+
+export interface HotkeyConfig {
+  enabled: boolean;
+  accelerator: string;
+}
+
+export interface HotkeyDeps {
+  globalShortcut: GlobalShortcutLike;
+  onPress: () => void;
+}
+
+export class HotkeyManager {
+  private current: string | null = null;
+  constructor(private readonly deps: HotkeyDeps) {}
+
+  apply(cfg: HotkeyConfig): boolean {
+    if (this.current && this.current !== cfg.accelerator) {
+      this.deps.globalShortcut.unregister(this.current);
+      this.current = null;
+    }
+    if (!cfg.enabled) {
+      this.deps.globalShortcut.unregisterAll();
+      this.current = null;
+      return true;
+    }
+    if (this.current === cfg.accelerator) return true;
+    const ok = this.deps.globalShortcut.register(cfg.accelerator, this.deps.onPress);
+    if (ok) this.current = cfg.accelerator;
+    return ok;
+  }
+}
+```
+
+```bash
+npx vitest run src/main/hotkey.test.ts
+```
+
+Expected: 4 passed.
+
+- [ ] **Step 3: Wire into `src/main/services.ts`**
+
+Add at the top:
+
+```ts
+import { globalShortcut } from 'electron';
+import { HotkeyManager } from './hotkey';
+import { IpcChannels } from '@shared/ipc';
+```
+
+Inside `createServices`, after `registerIpcHandlers(...)` and before the return statement:
+
+```ts
+const hotkey = new HotkeyManager({
+  globalShortcut,
+  onPress: () => {
+    for (const w of getWindows()) {
+      w.webContents.send(IpcChannels.HotkeyPressed);
+      if (!w.isVisible()) w.show();
+      w.focus();
+    }
+  },
+});
+const applyHotkey = () => {
+  const s = settings.read();
+  hotkey.apply({ enabled: s.hotkeyEnabled, accelerator: s.hotkeyAccelerator });
+};
+applyHotkey();
+
+const origWrite = settings.write.bind(settings);
+settings.write = (next) => {
+  origWrite(next);
+  applyHotkey();
+};
+```
+
+- [ ] **Step 4: Add `globalShortcut.unregisterAll()` to quit handler in `src/main/index.ts`**
+
+```ts
+import { app, BrowserWindow, session, globalShortcut } from 'electron';
+// ...
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll();
+});
+```
+
+- [ ] **Step 5: Verify in dev — toggle hotkey on, blur the app, press hotkey, observe a recording starts**
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/main/hotkey.ts src/main/hotkey.test.ts src/main/services.ts src/main/index.ts
+git commit -m "feat(hotkey): global accelerator wired to recorder"
+```
+
+---
+
+## Task 19: Sidecar binary fetch script
+
+**Files:**
+- Create: `scripts/fetch-sidecars.mjs`
+- Create: `resources/.gitkeep`
+
+The script downloads platform-appropriate `whisper` and `ffmpeg` binaries during `postinstall`. Binaries themselves are gitignored.
+
+- [ ] **Step 1: Create `scripts/fetch-sidecars.mjs`**
+
+```js
+import { mkdir, chmod, stat } from 'node:fs/promises';
+import { existsSync, createWriteStream } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { pipeline } from 'node:stream/promises';
+
+// Verify URLs against current upstream releases at implementation time:
+//   - whisper.cpp: https://github.com/ggml-org/whisper.cpp/releases
+//   - ffmpeg static builds:
+//       Mac:    https://evermeet.cx/ffmpeg/
+//       Win:    https://www.gyan.dev/ffmpeg/builds/
+//       Linux:  https://johnvansickle.com/ffmpeg/
+const TARGETS = {
+  'darwin-arm64': {
+    folder: 'mac-arm64',
+    whisperUrl: 'REPLACE_WITH_VERIFIED_WHISPER_RELEASE_URL_MAC_ARM64',
+    ffmpegUrl: 'REPLACE_WITH_VERIFIED_FFMPEG_STATIC_URL_MAC_ARM64',
+  },
+  'darwin-x64': {
+    folder: 'mac-x64',
+    whisperUrl: 'REPLACE_WITH_VERIFIED_WHISPER_RELEASE_URL_MAC_X64',
+    ffmpegUrl: 'REPLACE_WITH_VERIFIED_FFMPEG_STATIC_URL_MAC_X64',
+  },
+  'win32-x64': {
+    folder: 'win-x64',
+    whisperUrl: 'REPLACE_WITH_VERIFIED_WHISPER_RELEASE_URL_WIN_X64',
+    ffmpegUrl: 'REPLACE_WITH_VERIFIED_FFMPEG_STATIC_URL_WIN_X64',
+  },
+  'linux-x64': {
+    folder: 'linux-x64',
+    whisperUrl: 'REPLACE_WITH_VERIFIED_WHISPER_RELEASE_URL_LINUX_X64',
+    ffmpegUrl: 'REPLACE_WITH_VERIFIED_FFMPEG_STATIC_URL_LINUX_X64',
+  },
+};
+
+const key = `${process.platform}-${process.arch}`;
+const target = TARGETS[key];
+if (!target) {
+  console.warn(`fetch-sidecars: no binaries configured for ${key}; skipping`);
+  process.exit(0);
+}
+
+const baseDir = join(process.cwd(), 'resources', 'bin', target.folder);
+await mkdir(baseDir, { recursive: true });
+
+const ext = process.platform === 'win32' ? '.exe' : '';
+await Promise.all([
+  download(target.whisperUrl, join(baseDir, `whisper${ext}`)),
+  download(target.ffmpegUrl, join(baseDir, `ffmpeg${ext}`)),
+]);
+console.log(`fetch-sidecars: ready in ${baseDir}`);
+
+async function download(url, dest) {
+  if (url.startsWith('REPLACE_')) {
+    console.warn(`fetch-sidecars: ${dest} URL not configured; skipping`);
+    return;
+  }
+  if (existsSync(dest) && (await stat(dest)).size > 0) return;
+  const res = await fetch(url);
+  if (!res.ok || !res.body) throw new Error(`download failed ${res.status} ${url}`);
+  await mkdir(dirname(dest), { recursive: true });
+  await pipeline(res.body, createWriteStream(dest));
+  if (process.platform !== 'win32') await chmod(dest, 0o755);
+}
+```
+
+- [ ] **Step 2: Create `resources/.gitkeep`**
+
+```
+# Sidecar binaries live here; populated by `npm run fetch:sidecars`.
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add scripts/ resources/.gitkeep
+git commit -m "chore(sidecars): postinstall script to fetch whisper + ffmpeg"
+```
+
+---
+
+## Task 20: electron-builder configuration
+
+**Files:**
+- Create: `electron-builder.yml`
+- Create: `build/entitlements.mac.plist`
+
+- [ ] **Step 1: Write `electron-builder.yml`**
+
+```yaml
+appId: dev.local.voicenotes
+productName: Voice Notes
+directories:
+  output: release
+  buildResources: build
+files:
+  - out/**
+  - package.json
+  - "!node_modules/**/test/**"
+  - "!node_modules/**/*.md"
+asarUnpack:
+  - "**/*.{node,dll}"
+  - "node_modules/better-sqlite3/**"
+extraResources:
+  - from: resources/bin
+    to: bin
+    filter: ["**/*"]
+mac:
+  category: public.app-category.productivity
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+  hardenedRuntime: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+win:
+  target: nsis
+linux:
+  target: [AppImage, deb]
+  category: Utility
+npmRebuild: true
+```
+
+- [ ] **Step 2: Write `build/entitlements.mac.plist`**
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>com.apple.security.cs.allow-jit</key><true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+    <key>com.apple.security.device.audio-input</key><true/>
+  </dict>
+</plist>
+```
+
+- [ ] **Step 3: Smoke-build for the host platform**
+
+```bash
+npm run build
+npx electron-builder --dir
+```
+
+Expected: build succeeds; `release/<platform>-unpacked/` contains the app.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add electron-builder.yml build/entitlements.mac.plist
+git commit -m "chore(packaging): electron-builder config + mac entitlements"
+```
+
+---
+
+## Task 21: README
+
+**Files:**
+- Create: `README.md`
+
+- [ ] **Step 1: Write README**
+
+```markdown
+# Voice Notes
+
+Cross-platform desktop notetaking app. Press a button or a global hotkey, speak, and the app turns your speech into clean readable notes — locally transcribed, then summarized by Claude (or any OpenAI-compatible LLM you point it at).
+
+## Stack
+
+- Electron + React + TypeScript (`electron-vite`, `electron-builder`)
+- `better-sqlite3` (FTS5 for search)
+- `whisper.cpp` sidecar for local transcription
+- `ffmpeg` sidecar to remux audio to 16kHz mono WAV
+- `@anthropic-ai/sdk` (default) or `openai` SDK pointed at OpenRouter / any custom base URL
+
+## Develop
+
+```bash
+npm install                       # also fetches sidecar binaries
+npm run dev                       # starts electron-vite dev server
+npm run typecheck && npm test     # before commits
+```
+
+### Sidecars
+
+Sidecar binaries are downloaded into `resources/bin/<platform>/` by `scripts/fetch-sidecars.mjs` (run automatically by `postinstall`). The script ships with `REPLACE_…` placeholder URLs — fill them in with verified release URLs from:
+
+- whisper.cpp: https://github.com/ggml-org/whisper.cpp/releases
+- ffmpeg static builds: https://evermeet.cx/ffmpeg/ (Mac), https://www.gyan.dev/ffmpeg/builds/ (Win), https://johnvansickle.com/ffmpeg/ (Linux)
+
+Update `src/main/whisper/registry.ts` with the matching SHA-256 from upstream for each model. The first run downloads the default `ggml-base.en.bin` model into `userData/models/`.
+
+## Configure a provider
+
+Open Settings inside the app and pick:
+
+- **Anthropic** — paste an Anthropic API key. Default model: `claude-opus-4-7`.
+- **OpenRouter** — paste an OpenRouter key.
+- **Custom (OpenAI-compatible)** — supply base URL, key, model. Works with Ollama, LM Studio, Groq, Together, etc.
+
+Keys are encrypted at rest via Electron `safeStorage` (OS keychain).
+
+## Package
+
+```bash
+npm run package          # uses host platform
+npm run package:mac
+npm run package:win
+npm run package:linux
+```
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add README.md
+git commit -m "docs: README with setup, sidecar instructions, packaging"
+```
+
+---
+
+## Task 22: Playwright E2E smoke test (golden path)
+
+**Files:**
+- Create: `playwright.config.ts`
+- Create: `e2e/smoke.spec.ts`
+- Create: `e2e/fixtures/short.webm`
+
+The test injects a fixture audio blob through the renderer to exercise the full pipeline end-to-end. The LLM is faked via the `VOICE_NOTES_LLM_FAKE=1` switch already wired in Task 14.
+
+- [ ] **Step 1: Generate the fixture audio file (run once)**
+
+Use any installed `ffmpeg`:
+
+```bash
+mkdir -p e2e/fixtures
+ffmpeg -y -f lavfi -i "sine=frequency=440:duration=2" \
+  -ar 48000 -ac 1 -c:a libopus \
+  e2e/fixtures/short.webm
+```
+
+If you don't have `ffmpeg` installed system-wide, manually record any 2-second `.webm` clip and place it at `e2e/fixtures/short.webm`. The test does not assert on transcript content.
+
+- [ ] **Step 2: Create `playwright.config.ts`**
+
+```ts
+import { defineConfig } from '@playwright/test';
+
+export default defineConfig({
+  testDir: 'e2e',
+  timeout: 60_000,
+  use: { trace: 'retain-on-failure' },
+});
+```
+
+- [ ] **Step 3: Create `e2e/smoke.spec.ts`**
+
+```ts
+import { test, expect, _electron as electron } from '@playwright/test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+test('record → transcribe → llm (faked) → ready', async () => {
+  const app = await electron.launch({
+    args: ['out/main/index.js'],
+    env: {
+      ...process.env,
+      VOICE_NOTES_LLM_FAKE: '1',
+    },
+  });
+
+  const win = await app.firstWindow();
+  await win.waitForSelector('text=Voice Notes');
+
+  const audio = readFileSync(join(__dirname, 'fixtures/short.webm'));
+  const id = await win.evaluate(async (audioBytes) => {
+    const buf = new Uint8Array(audioBytes).buffer;
+    const r = await window.api.notes.create({ audio: buf, durationMs: 2000 });
+    return r.id;
+  }, [...audio]);
+  expect(id).toBeTruthy();
+
+  await expect.poll(async () => {
+    const note = await win.evaluate((nid) => window.api.notes.get(nid), id);
+    return note?.status;
+  }, { timeout: 30_000 }).toBe('ready');
+
+  await app.close();
+});
+```
+
+- [ ] **Step 4: Run the test**
+
+```bash
+npm run build
+npx playwright install
+npm run e2e
+```
+
+Expected: 1 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add playwright.config.ts e2e/
+git commit -m "test(e2e): playwright smoke covering the golden path"
+```
+
+---
+
+## Task 23: Final verification
+
+- [ ] **Step 1: Run the full check**
+
+```bash
+npm run typecheck
+npm test
+npm run build
+```
+
+Expected: all green.
+
+- [ ] **Step 2: Manual smoke**
+
+Boot `npm run dev`, configure your real Anthropic key in Settings, record a 10-second voice note, watch streaming notes appear, edit the title, return to the list, search for a word from the note, confirm it shows up. Toggle the global hotkey on, blur the app, press it, confirm recording starts.
+
+- [ ] **Step 3: Commit any final tweaks**
+
+```bash
+git add -A
+git commit -m "chore: post-smoke fixes" || echo "nothing to commit"
+```
+
+---
+
+## Spec coverage check
+
+- High-level architecture (3 layers, sandboxed renderer): Tasks 2, 13, 14
+- Components: Renderer (15-17), WhisperRunner (10), AudioPreprocessor (9), LLMClient + variants (6-8), NoteStore (4), SettingsStore (5), HotkeyManager (18)
+- Data flow (record → ready): Tasks 12, 14, 15, 16
+- Storage schema + FTS5: Tasks 3, 4
+- LLM provider configuration (3 providers, OpenAI-compat unified path): Tasks 6, 7, 8, 17
+- Whisper integration (sidecar, model download with SHA, ffmpeg remux): Tasks 9, 10, 11, 14, 19
+- Recording triggers (button + hotkey): Tasks 15, 18
+- Error handling (every status from spec): Tasks 4, 12, 14 (recovery), 16 (UI surfacing)
+- Security (CSP, sandbox, safeStorage, spawn-not-exec for sidecars): Tasks 2, 5, 9, 14
+- Testing (unit + IPC/integration via service tests + E2E): every task ships tests; Task 22 covers E2E
+- Packaging (dmg/nsis/AppImage, asarUnpack, extraResources): Task 20
+- Repository layout: matches spec section "Repository layout"
+
+## Open spec items (deferred per spec leans)
+
+- Markdown editor: plain `<textarea>` shipped (Task 16); replace later with a richer editor if desired.
+- "Recording in background" overlay window: not implemented in v1; the main window is shown/focused on hotkey press (Task 18) which meets the "captures from anywhere" goal more simply.
+- Hidden raw-transcript toggle: shipped via `<details>` element in DetailPage (Task 16).
+
+These match the leans recorded in the design's Open Questions section.
