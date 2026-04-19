@@ -1,6 +1,6 @@
-import { app, BrowserWindow, ipcMain, session } from 'electron';
-import { join } from 'path';
-import { IpcChannels } from '@shared/ipc';
+import { app, BrowserWindow, session } from 'electron';
+import { join } from 'node:path';
+import { createServices, type Services } from './services';
 
 const isDev = !app.isPackaged;
 
@@ -22,7 +22,7 @@ const cspDev =
   "media-src 'self' blob:; " +
   "font-src 'self' data:;";
 
-function createMainWindow(): BrowserWindow {
+async function createMainWindow(): Promise<BrowserWindow> {
   const win = new BrowserWindow({
     width: 1100,
     height: 720,
@@ -37,15 +37,28 @@ function createMainWindow(): BrowserWindow {
   });
 
   if (isDev && process.env['ELECTRON_RENDERER_URL']) {
-    win.loadURL(process.env['ELECTRON_RENDERER_URL']);
+    await win.loadURL(process.env['ELECTRON_RENDERER_URL']);
   } else {
-    win.loadFile(join(__dirname, '../renderer/index.html'));
+    await win.loadFile(join(__dirname, '../renderer/index.html'));
   }
 
   return win;
 }
 
-app.whenReady().then(() => {
+async function recoverInterrupted(services: Services): Promise<void> {
+  const interrupted = services.store
+    .list({ limit: 1000 })
+    .filter((n) => n.status === 'transcribing' || n.status === 'generating');
+  for (const n of interrupted) {
+    services.store.updateStatus(
+      n.id,
+      n.status === 'transcribing' ? 'transcription_failed' : 'generation_failed',
+      'Interrupted by app restart',
+    );
+  }
+}
+
+app.whenReady().then(async () => {
   session.defaultSession.webRequest.onHeadersReceived((details, cb) => {
     cb({
       responseHeaders: {
@@ -55,12 +68,13 @@ app.whenReady().then(() => {
     });
   });
 
-  ipcMain.handle(IpcChannels.AppPing, () => 'pong' as const);
+  const services = await createServices(() => BrowserWindow.getAllWindows());
+  await recoverInterrupted(services);
 
-  createMainWindow();
+  await createMainWindow();
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
+  app.on('activate', async () => {
+    if (BrowserWindow.getAllWindows().length === 0) await createMainWindow();
   });
 });
 
