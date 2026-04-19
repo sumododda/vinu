@@ -11,7 +11,10 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "outDir": "out/types/web",
-    "composite": true
+    "composite": true,
+    "paths": {
+      "@shared/*": ["./src/shared/*"]
+    }
   },
   "include": ["src/renderer/**/*", "src/shared/**/*"]
 }

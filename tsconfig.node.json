@@ -10,7 +10,10 @@
     "isolatedModules": true,
     "types": ["node", "electron-vite/node"],
     "outDir": "out/types/node",
-    "composite": true
+    "composite": true,
+    "paths": {
+      "@shared/*": ["./src/shared/*"]
+    }
   },
   "include": ["src/main/**/*", "src/preload/**/*", "src/shared/**/*", "scripts/**/*"]
 }
