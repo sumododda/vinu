@@ -37,6 +37,10 @@ export class AnthropicClient implements LLMClient {
         model: this.config.model,
         max_tokens: 4096,
         system: [
+          // cache_control is forward-compatible; Anthropic only activates the
+          // ephemeral cache once the block reaches ~1024 tokens. SYSTEM_PROMPT
+          // is currently under that threshold, so this is a no-op until the
+          // prompt grows.
           { type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
         ],
         messages: [{ role: 'user', content: buildUserPrompt(transcript) }],
