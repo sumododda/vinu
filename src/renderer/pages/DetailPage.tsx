@@ -605,7 +605,14 @@ export function DetailPage({ id }: DetailPageProps) {
         };
         snippets.push(editable.markdown);
       }
+      // Update the ref synchronously BEFORE insertSnippet runs — the onChange
+      // that fires from insertSnippet reads inlineImagesRef.current, and React
+      // hasn't committed the setInlineImages above yet, so without this line
+      // the newly-created tokens would be missing from the map seen by the
+      // very next normalize/save cycle, and the raw `inline-image:UUID` text
+      // would get persisted to the DB with no data-URL backing it.
       setInlineImages(nextInlineImages);
+      inlineImagesRef.current = nextInlineImages;
       insertSnippet(`\n\n${snippets.join('\n\n')}\n\n`);
     } catch (err) {
       setError(getErrorMessage(err, 'Failed to read image'));

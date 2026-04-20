@@ -1,6 +1,7 @@
 import { marked } from 'marked';
 import {
   type HighlightColor,
+  INLINE_IMAGE_TOKEN_RE,
   stripLeadingTitleHeading,
 } from '@shared/note-content';
 
@@ -19,10 +20,18 @@ interface HighlightToken {
 export function renderNoteHtml(markdown: string): string {
   if (!markdown.trim()) return '';
 
+  // Strip any dangling inline-image tokens (e.g. from a note whose data URL
+  // got lost before hydration). Rendering them as <img src="inline-image:…">
+  // would produce a broken-image icon; a plaintext fallback is friendlier.
+  const cleaned = markdown.replace(
+    INLINE_IMAGE_TOKEN_RE,
+    (_match, alt: string) => `*[missing image${alt ? `: ${alt}` : ''}]*`,
+  );
+
   const blockTokens: HighlightToken[] = [];
   const inlineTokens: HighlightToken[] = [];
 
-  let prepared = escapeHtml(stripLeadingTitleHeading(markdown));
+  let prepared = escapeHtml(stripLeadingTitleHeading(cleaned));
   prepared = prepared.replace(BLOCK_HIGHLIGHT_RE, (_match, color: HighlightColor, content: string) => {
     const key = `VINUBLOCKTOKEN${blockTokens.length}X`;
     blockTokens.push({ key, color, content });

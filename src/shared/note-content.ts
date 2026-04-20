@@ -13,7 +13,7 @@ const BLOCK_HIGHLIGHT_RE = new RegExp(
 const INLINE_HIGHLIGHT_RE = new RegExp(`==(${COLOR_PATTERN})::([\\s\\S]+?)==`, 'g');
 const IMAGE_RE = /!\[([^\]]*)\]\(([^)]+)\)/g;
 const LINK_RE = /\[([^\]]+)\]\(([^)]+)\)/g;
-const INLINE_IMAGE_TOKEN_RE = /!\[([^\]]*)\]\((inline-image:[^)]+)\)/g;
+export const INLINE_IMAGE_TOKEN_RE = /!\[([^\]]*)\]\((inline-image:[^)]+)\)/g;
 
 export interface InlineImageEditState {
   markdown: string;
