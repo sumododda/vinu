@@ -103,7 +103,7 @@ describe('main boot flow', () => {
     await Promise.resolve();
     await booting;
 
-    expect(win.loadFile).toHaveBeenCalledWith(expect.stringContaining('/src/renderer/index.html'));
+    expect(win.loadFile).toHaveBeenCalledWith(expect.stringContaining('src/renderer/index.html'));
   });
 
   it('shows an error page if service initialization fails', async () => {

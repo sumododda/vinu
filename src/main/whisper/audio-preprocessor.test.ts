@@ -1,20 +1,22 @@
 import { describe, it, expect, vi } from 'vitest';
+import { join } from 'node:path';
 import { AudioPreprocessor } from './audio-preprocessor';
 
 describe('AudioPreprocessor', () => {
   it('runs ffmpeg with 16k mono wav args and returns the output path', async () => {
     const run = vi.fn().mockResolvedValue({ code: 0, stdout: '', stderr: '' });
+    const tmpDir = join('/tmp', 'vn');
     const pre = new AudioPreprocessor({
       ffmpegPath: '/bin/ffmpeg',
-      tmpDir: '/tmp/vn',
+      tmpDir,
       now: () => 1700000000000,
       run,
     });
     const out = await pre.preprocess('/in/a.webm');
-    expect(out).toBe('/tmp/vn/1700000000000.wav');
+    expect(out).toBe(join(tmpDir, '1700000000000.wav'));
     expect(run).toHaveBeenCalledWith(
       '/bin/ffmpeg',
-      ['-y', '-i', '/in/a.webm', '-ar', '16000', '-ac', '1', '-f', 'wav', '/tmp/vn/1700000000000.wav'],
+      ['-y', '-i', '/in/a.webm', '-ar', '16000', '-ac', '1', '-f', 'wav', join(tmpDir, '1700000000000.wav')],
       expect.anything(),
     );
   });
