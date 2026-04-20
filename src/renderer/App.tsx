@@ -27,7 +27,7 @@ export default function App() {
   return (
     <Layout sidebar={<Sidebar selectedId={route.name === 'detail' ? route.id : null} />}>
       {route.name === 'list' && <ListPage />}
-      {route.name === 'detail' && <DetailPage id={route.id} />}
+      {route.name === 'detail' && <DetailPage key={route.id} id={route.id} />}
       {route.name === 'settings' && <SettingsPage />}
     </Layout>
   );

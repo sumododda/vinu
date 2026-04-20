@@ -104,4 +104,34 @@ describe('registerIpcHandlers', () => {
     expect(unlink).toHaveBeenCalledWith('/tmp/audio/n-1.webm');
     expect(store.delete).toHaveBeenCalledWith('n-1');
   });
+
+  it('broadcasts note update events after direct note mutations', async () => {
+    const { registerIpcHandlers } = await import('./ipc-handlers');
+
+    const send = vi.fn();
+    const store = {
+      updateMarkdown: vi.fn(),
+      delete: vi.fn(),
+      deleteAudio: vi.fn(),
+      get: vi.fn().mockReturnValue({ audioPath: null }),
+    };
+
+    registerIpcHandlers({
+      store: store as any,
+      settings: {} as any,
+      pipeline: { process: vi.fn() } as any,
+      audioDir: '/tmp/audio',
+      windows: () => [{ webContents: { send } }] as any,
+    });
+
+    await ipcHandlers.get(IpcChannels.NotesUpdate)!({}, { id: 'n-1', markdown: '# Title' });
+    await ipcHandlers.get(IpcChannels.NotesDeleteAudio)!({}, 'n-1');
+    await ipcHandlers.get(IpcChannels.NotesDelete)!({}, 'n-1');
+
+    expect(send).toHaveBeenCalledWith(IpcChannels.NotesEvent, {
+      type: 'note:updated',
+      payload: { id: 'n-1' },
+    });
+    expect(send).toHaveBeenCalledTimes(3);
+  });
 });

@@ -73,6 +73,7 @@ export function registerIpcHandlers(deps: IpcHandlerDeps): {
   ipcMain.handle(IpcChannels.NotesUpdate, (_e, args: { id: string; markdown: string }) => {
     const title = (args.markdown.match(/^#\s+(.+?)\s*$/m)?.[1] ?? 'Untitled').trim();
     deps.store.updateMarkdown(args.id, args.markdown, title);
+    broadcastNotesEvent({ type: 'note:updated', payload: { id: args.id } });
   });
 
   ipcMain.handle(IpcChannels.NotesDelete, async (_e, id: string) => {
@@ -80,6 +81,7 @@ export function registerIpcHandlers(deps: IpcHandlerDeps): {
     await stopProcessing(id);
     if (note?.audioPath) await unlink(note.audioPath).catch(() => {});
     deps.store.delete(id);
+    broadcastNotesEvent({ type: 'note:updated', payload: { id } });
   });
 
   ipcMain.handle(IpcChannels.NotesDeleteAudio, async (_e, id: string) => {
@@ -87,6 +89,7 @@ export function registerIpcHandlers(deps: IpcHandlerDeps): {
     await stopProcessing(id);
     if (note?.audioPath) await unlink(note.audioPath).catch(() => {});
     deps.store.deleteAudio(id);
+    broadcastNotesEvent({ type: 'note:updated', payload: { id } });
   });
 
   ipcMain.handle(IpcChannels.NotesRetry, async (_e, id: string) => {
