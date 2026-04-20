@@ -4,6 +4,7 @@ const readyCallbacks: Array<() => unknown> = [];
 const allWindows: BrowserWindowMock[] = [];
 const onHeadersReceived = vi.fn();
 const appOn = vi.fn();
+const appEventHandlers = new Map<string, (...args: any[]) => unknown>();
 
 class BrowserWindowMock {
   public readonly loadFile = vi.fn().mockResolvedValue(undefined);
@@ -37,7 +38,10 @@ vi.mock('electron', () => ({
         readyCallbacks.push(cb);
       },
     }),
-    on: appOn,
+    on: (event: string, handler: (...args: any[]) => unknown) => {
+      appOn(event, handler);
+      appEventHandlers.set(event, handler);
+    },
     quit: vi.fn(),
   },
   BrowserWindow: BrowserWindowMock,
@@ -58,6 +62,7 @@ describe('main boot flow', () => {
   beforeEach(() => {
     readyCallbacks.length = 0;
     allWindows.length = 0;
+    appEventHandlers.clear();
     onHeadersReceived.mockClear();
     appOn.mockClear();
     createServices.mockReset();
@@ -112,5 +117,40 @@ describe('main boot flow', () => {
     expect(finalUrl).toContain('data:text/html;charset=utf-8,');
     expect(decodeURIComponent(finalUrl.split(',')[1]!)).toContain('model download failed');
     expect(win.loadFile).not.toHaveBeenCalled();
+  });
+
+  it('retries service initialization on a later activate after an initial failure', async () => {
+    createServices
+      .mockRejectedValueOnce(new Error('transient boot failure'))
+      .mockResolvedValueOnce({
+        store: { list: () => [] },
+        settings: {},
+        pipeline: {},
+        audioDir: '/tmp/audio',
+      });
+
+    await import('./index');
+    await readyCallbacks[0]!();
+
+    const firstWindow = allWindows[0]!;
+    let firstUrl = firstWindow.loadURL.mock.calls.at(-1)?.[0] as string;
+    expect(decodeURIComponent(firstUrl.split(',')[1]!)).toContain('transient boot failure');
+    expect(firstWindow.loadFile).not.toHaveBeenCalled();
+
+    firstWindow.destroy();
+
+    const activate = appEventHandlers.get('activate');
+    expect(activate).toBeTypeOf('function');
+    await activate!();
+
+    expect(createServices).toHaveBeenCalledTimes(2);
+    expect(allWindows).toHaveLength(2);
+
+    const secondWindow = allWindows[1]!;
+    firstUrl = secondWindow.loadURL.mock.calls[0]?.[0] as string;
+    expect(firstUrl).toContain('data:text/html;charset=utf-8,');
+    expect(secondWindow.loadFile).toHaveBeenCalledWith(
+      expect.stringContaining('/src/renderer/index.html'),
+    );
   });
 });

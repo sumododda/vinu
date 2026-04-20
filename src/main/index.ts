@@ -80,6 +80,7 @@ function ensureServices(): Promise<Services> {
       return services;
     } catch (err) {
       servicesInitError = err;
+      servicesPromise = null;
       throw err;
     }
   })();
@@ -90,11 +91,6 @@ function ensureServices(): Promise<Services> {
 async function syncWindowToAppState(win: BrowserWindow): Promise<void> {
   if (servicesReady) {
     await loadRenderer(win);
-    return;
-  }
-
-  if (servicesInitError) {
-    await loadBootView(win, { kind: 'error', message: formatBootError(servicesInitError) });
     return;
   }
 
