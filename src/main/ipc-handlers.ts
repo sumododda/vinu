@@ -25,7 +25,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // but Electron IPC has no inherent shape or size guarantees, so we treat these
 // as untrusted inputs.
 const MAX_AUDIO_BYTES = 500 * 1024 * 1024; // 500 MB
-const MAX_STRING_BYTES = 5 * 1024 * 1024; // 5 MB (markdown / title / search)
+const MAX_TEXT_BYTES = 5 * 1024 * 1024; // settings / generic text
+const MAX_MARKDOWN_BYTES = 25 * 1024 * 1024; // inline images can live in note bodies
 const MAX_SEARCH_BYTES = 4 * 1024; // 4 KB is plenty for a search box
 const MAX_LIMIT = 1000;
 
@@ -108,9 +109,9 @@ function assertSettings(channel: string, value: unknown): Settings {
   if (provider !== 'anthropic' && provider !== 'openrouter' && provider !== 'custom') {
     throw new IpcValidationError(channel, 'provider must be anthropic | openrouter | custom');
   }
-  const apiKey = assertString(channel, s['apiKey'], 'apiKey', MAX_STRING_BYTES);
-  const baseUrl = assertString(channel, s['baseUrl'], 'baseUrl', MAX_STRING_BYTES);
-  const model = assertString(channel, s['model'], 'model', MAX_STRING_BYTES);
+  const apiKey = assertString(channel, s['apiKey'], 'apiKey', MAX_TEXT_BYTES);
+  const baseUrl = assertString(channel, s['baseUrl'], 'baseUrl', MAX_TEXT_BYTES);
+  const model = assertString(channel, s['model'], 'model', MAX_TEXT_BYTES);
   if (typeof s['hotkeyEnabled'] !== 'boolean') {
     throw new IpcValidationError(channel, 'hotkeyEnabled must be boolean');
   }
@@ -118,7 +119,7 @@ function assertSettings(channel: string, value: unknown): Settings {
     channel,
     s['hotkeyAccelerator'],
     'hotkeyAccelerator',
-    MAX_STRING_BYTES,
+    MAX_TEXT_BYTES,
   );
   if (typeof s['keepAudioDefault'] !== 'boolean') {
     throw new IpcValidationError(channel, 'keepAudioDefault must be boolean');
@@ -229,9 +230,20 @@ export function registerIpcHandlers(deps: IpcHandlerDeps): {
     const channel = IpcChannels.NotesUpdate;
     const o = assertObject(channel, args);
     const id = assertUuid(channel, o['id']);
-    const markdown = assertString(channel, o['markdown'], 'markdown', MAX_STRING_BYTES);
+    const markdown = assertString(channel, o['markdown'], 'markdown', MAX_MARKDOWN_BYTES);
     const title = extractTitle(markdown);
     deps.store.updateMarkdown(id, markdown, title);
+    broadcastNotesEvent({ type: 'note:updated', payload: { id } });
+  });
+
+  ipcMain.handle(IpcChannels.NotesSetFolder, (_e, args: unknown) => {
+    const channel = IpcChannels.NotesSetFolder;
+    const o = assertObject(channel, args);
+    const id = assertUuid(channel, o['id']);
+    const folderIdValue = o['folderId'];
+    const folderId =
+      folderIdValue == null ? null : assertUuid(channel, folderIdValue, 'folderId');
+    deps.store.setFolder(id, folderId);
     broadcastNotesEvent({ type: 'note:updated', payload: { id } });
   });
 
@@ -262,6 +274,16 @@ export function registerIpcHandlers(deps: IpcHandlerDeps): {
   ipcMain.handle(IpcChannels.NotesRetry, async (_e, id: unknown) => {
     const validId = assertUuid(IpcChannels.NotesRetry, id);
     startProcessing(validId);
+  });
+
+  ipcMain.handle(IpcChannels.FoldersList, () => deps.store.listFolders());
+
+  ipcMain.handle(IpcChannels.FoldersCreate, (_e, input: unknown) => {
+    const channel = IpcChannels.FoldersCreate;
+    const o = assertObject(channel, input);
+    const name = assertString(channel, o['name'], 'name', MAX_TEXT_BYTES).trim();
+    if (!name) throw new IpcValidationError(channel, 'name must not be empty');
+    return deps.store.createFolder({ id: uuidv4(), name });
   });
 
   ipcMain.handle(IpcChannels.SettingsGet, () => deps.settings.read());

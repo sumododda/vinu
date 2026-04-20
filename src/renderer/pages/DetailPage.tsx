@@ -1,15 +1,17 @@
-import { useEffect, useRef, useState } from 'react';
+import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
-import type { Note } from '../lib/api';
+import type { Folder, Note } from '../lib/api';
 import { extractTitle } from '@shared/title';
 import { BackIcon, CheckIcon, EditIcon, RetryIcon, TrashIcon } from '../components/Icons';
 import { formatDuration, formatRelativeTime } from '../lib/format';
+import { renderNoteHtml } from '../lib/note-html';
 
 interface DetailPageProps {
   id: string;
 }
 
 type ViewState = 'loading' | 'ready' | 'missing' | 'error';
+type HighlightColor = 'yellow' | 'green' | 'blue' | 'pink';
 
 function statusPillFor(note: Note): { label: string; variant: 'working' | 'failed' | null } {
   switch (note.status) {
@@ -30,11 +32,14 @@ function statusPillFor(note: Note): { label: string; variant: 'working' | 'faile
 
 export function DetailPage({ id }: DetailPageProps) {
   const [note, setNote] = useState<Note | null>(null);
+  const [folders, setFolders] = useState<Folder[]>([]);
   const [streaming, setStreaming] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [viewState, setViewState] = useState<ViewState>('loading');
   const [error, setError] = useState<string | null>(null);
+  const [showFolderCreator, setShowFolderCreator] = useState(false);
+  const [folderDraft, setFolderDraft] = useState('');
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingDraft = useRef<string | null>(null);
@@ -42,6 +47,8 @@ export function DetailPage({ id }: DetailPageProps) {
   const draftRef = useRef('');
   const editingRef = useRef(false);
   const noteRef = useRef<Note | null>(null);
+  const editorRef = useRef<HTMLTextAreaElement | null>(null);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
 
   draftRef.current = draft;
   editingRef.current = editing;
@@ -113,15 +120,18 @@ export function DetailPage({ id }: DetailPageProps) {
     let cancelled = false;
 
     setNote(null);
+    setFolders([]);
     setStreaming(null);
     setEditing(false);
     setDraft('');
     setError(null);
+    setFolderDraft('');
+    setShowFolderCreator(false);
     setViewState('loading');
     clearPendingSave();
     pendingDraft.current = null;
 
-    const refresh = async (opts?: { preserveDraft?: boolean; background?: boolean }) => {
+    const refreshNote = async (opts?: { preserveDraft?: boolean; background?: boolean }) => {
       try {
         await loadNote(id, opts);
       } catch (err) {
@@ -132,7 +142,19 @@ export function DetailPage({ id }: DetailPageProps) {
       }
     };
 
-    void refresh();
+    const refreshFolders = async () => {
+      try {
+        const loadedFolders = await api.folders.list();
+        if (!cancelled) setFolders(loadedFolders);
+      } catch (err) {
+        if (!cancelled) {
+          setError(getErrorMessage(err, 'Failed to load folders'));
+        }
+      }
+    };
+
+    void refreshNote();
+    void refreshFolders();
 
     const unsub = api.notes.onEvent((e) => {
       if (e.payload.id !== id) return;
@@ -142,7 +164,7 @@ export function DetailPage({ id }: DetailPageProps) {
       }
 
       setStreaming(null);
-      void refresh({ preserveDraft: editingRef.current, background: true });
+      void refreshNote({ preserveDraft: editingRef.current, background: true });
     });
 
     return () => {
@@ -166,6 +188,65 @@ export function DetailPage({ id }: DetailPageProps) {
         setError(getErrorMessage(err, 'Failed to save note'));
       });
     }, 500);
+  }
+
+  function applyDraftUpdate(next: string, selectionStart?: number, selectionEnd?: number) {
+    onChange(next);
+    if (selectionStart == null || selectionEnd == null) return;
+
+    requestAnimationFrame(() => {
+      const textarea = editorRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      textarea.setSelectionRange(selectionStart, selectionEnd);
+    });
+  }
+
+  function wrapSelection(prefix: string, suffix: string, fallback: string) {
+    const textarea = editorRef.current;
+    const current = draftRef.current;
+    const start = textarea?.selectionStart ?? current.length;
+    const end = textarea?.selectionEnd ?? current.length;
+    const selected = current.slice(start, end) || fallback;
+    const next = `${current.slice(0, start)}${prefix}${selected}${suffix}${current.slice(end)}`;
+    const selectionStart = start + prefix.length;
+    const selectionEnd = selectionStart + selected.length;
+    applyDraftUpdate(next, selectionStart, selectionEnd);
+  }
+
+  function insertSnippet(snippet: string) {
+    const textarea = editorRef.current;
+    const current = draftRef.current;
+    const start = textarea?.selectionStart ?? current.length;
+    const end = textarea?.selectionEnd ?? current.length;
+    const next = `${current.slice(0, start)}${snippet}${current.slice(end)}`;
+    const caret = start + snippet.length;
+    applyDraftUpdate(next, caret, caret);
+  }
+
+  function onHighlight(color: HighlightColor) {
+    const selection = editorRef.current
+      ? draftRef.current.slice(editorRef.current.selectionStart, editorRef.current.selectionEnd)
+      : '';
+    if (selection.includes('\n')) {
+      wrapSelection(`\n\n:::highlight ${color}\n`, '\n:::\n\n', 'Highlighted lines');
+      return;
+    }
+    wrapSelection(`==${color}::`, '==', 'highlighted text');
+  }
+
+  async function onPickImage(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      const alt = file.name.replace(/\.[^.]+$/, '') || 'Inline image';
+      insertSnippet(`\n\n![${alt}](${dataUrl})\n\n`);
+      event.target.value = '';
+    } catch (err) {
+      setError(getErrorMessage(err, 'Failed to read image'));
+    }
   }
 
   async function onToggleEditing() {
@@ -208,6 +289,38 @@ export function DetailPage({ id }: DetailPageProps) {
     }
   }
 
+  async function onSelectFolder(nextFolderId: string) {
+    const folderId = nextFolderId || null;
+    const folderName = folderId ? folders.find((folder) => folder.id === folderId)?.name ?? null : null;
+    setError(null);
+    try {
+      await api.notes.setFolder(id, folderId);
+      setNote((prev) => (prev ? { ...prev, folderId, folderName } : prev));
+    } catch (err) {
+      setError(getErrorMessage(err, 'Failed to move note'));
+    }
+  }
+
+  async function onCreateFolder() {
+    const name = folderDraft.trim();
+    if (!name) return;
+
+    setError(null);
+    try {
+      const folder = await api.folders.create(name);
+      setFolders((prev) => {
+        const withoutDupe = prev.filter((item) => item.id !== folder.id);
+        return [...withoutDupe, folder].sort((a, b) => a.name.localeCompare(b.name));
+      });
+      await api.notes.setFolder(id, folder.id);
+      setNote((prev) => (prev ? { ...prev, folderId: folder.id, folderName: folder.name } : prev));
+      setFolderDraft('');
+      setShowFolderCreator(false);
+    } catch (err) {
+      setError(getErrorMessage(err, 'Failed to create folder'));
+    }
+  }
+
   function navigateHome() {
     window.location.hash = '#/';
   }
@@ -240,6 +353,7 @@ export function DetailPage({ id }: DetailPageProps) {
 
   const displayTitle = note?.title || 'Untitled';
   const isUntitled = !note?.title;
+  const renderedHtml = renderNoteHtml(showStream ? streaming ?? '' : note?.markdown ?? '');
 
   return (
     <div>
@@ -283,6 +397,63 @@ export function DetailPage({ id }: DetailPageProps) {
             <span>{formatRelativeTime(note.createdAt)}</span>
             <span className="sep" />
             <span>{formatDuration(note.durationMs)}</span>
+            {note.folderName && (
+              <>
+                <span className="sep" />
+                <span>{note.folderName}</span>
+              </>
+            )}
+          </div>
+
+          <div className="note-controls card">
+            <div className="field">
+              <label htmlFor="folder-select">Folder</label>
+              <div className="folder-actions">
+                <select
+                  id="folder-select"
+                  value={note.folderId ?? ''}
+                  onChange={(e) => void onSelectFolder(e.target.value)}
+                >
+                  <option value="">Ungrouped</option>
+                  {folders.map((folder) => (
+                    <option key={folder.id} value={folder.id}>
+                      {folder.name}
+                    </option>
+                  ))}
+                </select>
+                {!showFolderCreator ? (
+                  <button className="solid" onClick={() => setShowFolderCreator(true)}>
+                    New folder
+                  </button>
+                ) : (
+                  <>
+                    <input
+                      type="text"
+                      value={folderDraft}
+                      onChange={(e) => setFolderDraft(e.target.value)}
+                      placeholder="Folder name"
+                      aria-label="New folder name"
+                    />
+                    <button
+                      className="primary"
+                      onClick={() => void onCreateFolder()}
+                      disabled={!folderDraft.trim()}
+                    >
+                      Create
+                    </button>
+                    <button
+                      className="ghost"
+                      onClick={() => {
+                        setShowFolderCreator(false);
+                        setFolderDraft('');
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
           </div>
         </>
       )}
@@ -303,19 +474,53 @@ export function DetailPage({ id }: DetailPageProps) {
         </div>
       )}
 
-      {note && (showStream ? (
-        <pre className="prose">{streaming}</pre>
-      ) : showEditor ? (
-        <textarea
-          className="editor"
-          value={draft}
-          onChange={(e) => onChange(e.target.value)}
-          spellCheck
-          autoFocus
-        />
+      {showEditor ? (
+        <>
+          <div className="editor-toolbar">
+            <button className="solid" onClick={() => imageInputRef.current?.click()}>
+              Inline image
+            </button>
+            <button className="highlight-button yellow" onClick={() => onHighlight('yellow')}>
+              Yellow
+            </button>
+            <button className="highlight-button green" onClick={() => onHighlight('green')}>
+              Green
+            </button>
+            <button className="highlight-button blue" onClick={() => onHighlight('blue')}>
+              Blue
+            </button>
+            <button className="highlight-button pink" onClick={() => onHighlight('pink')}>
+              Pink
+            </button>
+          </div>
+          <p className="editor-note">
+            Images are embedded inline in the note body. Highlight a word or a few lines, then pick
+            a color to wrap that selection.
+          </p>
+          <textarea
+            ref={editorRef}
+            className="editor"
+            value={draft}
+            onChange={(e) => onChange(e.target.value)}
+            spellCheck
+            autoFocus
+          />
+          <input
+            ref={imageInputRef}
+            className="visually-hidden"
+            type="file"
+            accept="image/*"
+            onChange={(e) => void onPickImage(e)}
+          />
+        </>
       ) : (
-        <pre className="prose">{note.markdown || ''}</pre>
-      ))}
+        <article
+          className={`prose rendered-note ${showStream ? 'streaming-note' : ''}`}
+          dangerouslySetInnerHTML={{
+            __html: renderedHtml || '<p class="empty-note">This note is empty.</p>',
+          }}
+        />
+      )}
 
       {note?.transcript && (
         <details className="transcript">
@@ -334,6 +539,15 @@ export function DetailPage({ id }: DetailPageProps) {
       )}
     </div>
   );
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error('Unable to read file'));
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.readAsDataURL(file);
+  });
 }
 
 function getErrorMessage(err: unknown, fallback: string): string {

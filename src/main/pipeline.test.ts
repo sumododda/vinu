@@ -2,12 +2,16 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { runMigrations } from './db/runner';
 import initSql from './db/migrations/001_init.sql?raw';
+import foldersSql from './db/migrations/002_folders_inline.sql?raw';
 import { NoteStore } from './db/store';
 import { Pipeline } from './pipeline';
 
 function freshStore(): NoteStore {
   const db = new Database(':memory:');
-  runMigrations(db, [{ version: 1, sql: initSql }]);
+  runMigrations(db, [
+    { version: 1, sql: initSql },
+    { version: 2, sql: foldersSql },
+  ]);
   return new NoteStore(db);
 }
 

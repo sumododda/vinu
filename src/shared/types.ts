@@ -17,6 +17,8 @@ export interface NoteSummary {
   title: string;
   status: NoteStatus;
   durationMs: number;
+  folderId: string | null;
+  folderName: string | null;
 }
 
 export interface Note extends NoteSummary {
@@ -26,6 +28,13 @@ export interface Note extends NoteSummary {
   errorMessage: string | null;
   modelUsed: string | null;
   provider: string | null;
+}
+
+export interface Folder {
+  id: string;
+  createdAt: number;
+  updatedAt: number;
+  name: string;
 }
 
 export type Provider = 'anthropic' | 'openrouter' | 'custom';

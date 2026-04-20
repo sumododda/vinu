@@ -68,6 +68,8 @@ describe('Sidebar', () => {
           title: 'First note',
           status: 'ready',
           durationMs: 65_000,
+          folderId: null,
+          folderName: null,
         },
       ])
       .mockRejectedValueOnce(new Error('refresh failed'));

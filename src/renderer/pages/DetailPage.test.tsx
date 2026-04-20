@@ -11,10 +11,15 @@ const { mockApi } = vi.hoisted(() => ({
     notes: {
       get: vi.fn(),
       update: vi.fn(),
+      setFolder: vi.fn(),
       delete: vi.fn(),
       deleteAudio: vi.fn(),
       retry: vi.fn(),
       onEvent: vi.fn(),
+    },
+    folders: {
+      list: vi.fn(),
+      create: vi.fn(),
     },
   },
 }));
@@ -37,6 +42,8 @@ function makeNote(overrides: Partial<Note> = {}): Note {
     errorMessage: null,
     modelUsed: null,
     provider: null,
+    folderId: null,
+    folderName: null,
     ...overrides,
   };
 }
@@ -75,9 +82,12 @@ describe('DetailPage', () => {
 
     mockApi.notes.get.mockReset();
     mockApi.notes.update.mockReset();
+    mockApi.notes.setFolder.mockReset();
     mockApi.notes.delete.mockReset();
     mockApi.notes.deleteAudio.mockReset();
     mockApi.notes.retry.mockReset();
+    mockApi.folders.list.mockReset();
+    mockApi.folders.create.mockReset();
     mockApi.notes.onEvent.mockImplementation((cb: (event: NotesEvent) => void) => {
       emitEvent = cb;
       return () => {
@@ -85,9 +95,12 @@ describe('DetailPage', () => {
       };
     });
     mockApi.notes.update.mockResolvedValue(undefined);
+    mockApi.notes.setFolder.mockResolvedValue(undefined);
     mockApi.notes.delete.mockResolvedValue(undefined);
     mockApi.notes.deleteAudio.mockResolvedValue(undefined);
     mockApi.notes.retry.mockResolvedValue(undefined);
+    mockApi.folders.list.mockResolvedValue([]);
+    mockApi.folders.create.mockResolvedValue({ id: 'folder-1', name: 'Folder', createdAt: 1, updatedAt: 1 });
     vi.stubGlobal('confirm', vi.fn(() => true));
   });
 

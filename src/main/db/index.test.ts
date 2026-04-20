@@ -15,6 +15,7 @@ describe('openDatabase', () => {
     ).map((r) => r.name);
     expect(tables).toContain('notes');
     expect(tables).toContain('settings');
+    expect(tables).toContain('folders');
     expect(tables).toContain('schema_migrations');
     expect(tables).toContain('notes_fts');
   });

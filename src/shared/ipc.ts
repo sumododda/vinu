@@ -1,4 +1,4 @@
-import type { Note, NoteSummary, NoteStatus, Settings } from './types';
+import type { Folder, Note, NoteSummary, NoteStatus, Settings } from './types';
 
 export const IpcChannels = {
   AppPing: 'app:ping',
@@ -6,10 +6,13 @@ export const IpcChannels = {
   NotesList: 'notes:list',
   NotesGet: 'notes:get',
   NotesUpdate: 'notes:update',
+  NotesSetFolder: 'notes:setFolder',
   NotesDelete: 'notes:delete',
   NotesDeleteAudio: 'notes:deleteAudio',
   NotesRetry: 'notes:retry',
   NotesEvent: 'notes:event',
+  FoldersList: 'folders:list',
+  FoldersCreate: 'folders:create',
   SettingsGet: 'settings:get',
   SettingsSet: 'settings:set',
   HotkeyPressed: 'hotkey:pressed',
@@ -30,10 +33,15 @@ export type Api = {
     list(opts?: { search?: string; limit?: number }): Promise<NoteSummary[]>;
     get(id: string): Promise<Note | null>;
     update(id: string, markdown: string): Promise<void>;
+    setFolder(id: string, folderId: string | null): Promise<void>;
     delete(id: string): Promise<void>;
     deleteAudio(id: string): Promise<void>;
     retry(id: string): Promise<void>;
     onEvent(cb: (e: NotesEvent) => void): () => void;
+  };
+  folders: {
+    list(): Promise<Folder[]>;
+    create(name: string): Promise<Folder>;
   };
   settings: {
     get(): Promise<Settings>;
@@ -42,7 +50,7 @@ export type Api = {
   onHotkey(cb: () => void): () => void;
 };
 
-export type { Note, NoteSummary, NoteStatus, Settings };
+export type { Folder, Note, NoteSummary, NoteStatus, Settings };
 
 declare global {
   interface Window {

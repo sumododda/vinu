@@ -96,4 +96,28 @@ describe('NoteStore', () => {
     store.setMarkdown('n1', '# Notes\n\nPelicanesque ideas', 'Notes', 'm', 'p');
     expect(store.list({ search: 'pel' }).length).toBe(1);
   });
+
+  it('preserves folder metadata on notes', () => {
+    store.create({ id: 'n1', audioPath: '/tmp/a.webm', durationMs: 1 });
+    const folder = store.createFolder({ id: 'f1', name: 'Projects' });
+    store.setFolder('n1', folder.id);
+
+    expect(store.listFolders()).toEqual([folder]);
+    expect(store.get('n1')?.folderName).toBe('Projects');
+    expect(store.list()[0]?.folderId).toBe('f1');
+  });
+
+  it('search ignores inline image blobs but still finds highlighted text', () => {
+    store.create({ id: 'n1', audioPath: '/tmp/1.webm', durationMs: 1 });
+    store.setMarkdown(
+      'n1',
+      '# Visual note\n\n==yellow::Important follow up==\n\n![chart](data:image/png;base64,AAAA)',
+      'Visual note',
+      'm',
+      'p',
+    );
+
+    expect(store.list({ search: 'important' }).map((note) => note.id)).toEqual(['n1']);
+    expect(store.list({ search: 'AAAA' })).toHaveLength(0);
+  });
 });
