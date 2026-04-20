@@ -1,16 +1,34 @@
 import { useEffect, useState } from 'react';
+import './styles.css';
+import { Layout } from './components/Layout';
+import { Sidebar } from './components/Sidebar';
+import { DetailPage } from './pages/DetailPage';
+import { ListPage } from './pages/ListPage';
+import { SettingsPage } from './pages/SettingsPage';
+
+type Route = { name: 'list' } | { name: 'detail'; id: string } | { name: 'settings' };
+
+function parseHash(): Route {
+  const hash = window.location.hash.replace(/^#/, '');
+  if (hash.startsWith('/notes/')) return { name: 'detail', id: hash.slice('/notes/'.length) };
+  if (hash === '/settings') return { name: 'settings' };
+  return { name: 'list' };
+}
 
 export default function App() {
-  const [pong, setPong] = useState<string>('…');
+  const [route, setRoute] = useState<Route>(parseHash);
 
   useEffect(() => {
-    window.api.ping().then(setPong).catch((e) => setPong(`error: ${e.message}`));
+    const onHash = () => setRoute(parseHash());
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
   return (
-    <main style={{ fontFamily: 'system-ui', padding: 24 }}>
-      <h1>vinu</h1>
-      <p>IPC ping: {pong}</p>
-    </main>
+    <Layout sidebar={<Sidebar selectedId={route.name === 'detail' ? route.id : null} />}>
+      {route.name === 'list' && <ListPage />}
+      {route.name === 'detail' && <DetailPage id={route.id} />}
+      {route.name === 'settings' && <SettingsPage />}
+    </Layout>
   );
 }
