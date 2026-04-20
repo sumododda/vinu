@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { join } from 'node:path';
 import { IpcChannels } from '@shared/ipc';
 
 const ipcHandlers = new Map<string, (...args: any[]) => any>();
@@ -101,7 +102,9 @@ describe('registerIpcHandlers', () => {
     finishProcess();
     await del;
 
-    expect(unlink).toHaveBeenCalledWith('/tmp/audio/n-1.webm');
+    // path.join for cross-platform — on Windows the handler resolves to
+    // D:\tmp\audio\n-1.webm via path.resolve for the defense-in-depth guard.
+    expect(unlink).toHaveBeenCalledWith(expect.stringContaining(join('audio', 'n-1.webm')));
     expect(store.delete).toHaveBeenCalledWith('11111111-1111-4111-8111-111111111111');
   });
 

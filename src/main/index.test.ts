@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { join } from 'node:path';
 
 const readyCallbacks: Array<() => unknown> = [];
 const allWindows: BrowserWindowMock[] = [];
@@ -103,7 +104,9 @@ describe('main boot flow', () => {
     await Promise.resolve();
     await booting;
 
-    expect(win.loadFile).toHaveBeenCalledWith(expect.stringContaining('src/renderer/index.html'));
+    expect(win.loadFile).toHaveBeenCalledWith(
+      expect.stringContaining(join('src', 'renderer', 'index.html')),
+    );
   });
 
   it('shows an error page if service initialization fails', async () => {
@@ -150,7 +153,7 @@ describe('main boot flow', () => {
     firstUrl = secondWindow.loadURL.mock.calls[0]?.[0] as string;
     expect(firstUrl).toContain('data:text/html;charset=utf-8,');
     expect(secondWindow.loadFile).toHaveBeenCalledWith(
-      expect.stringContaining('/src/renderer/index.html'),
+      expect.stringContaining(join('src', 'renderer', 'index.html')),
     );
   });
 });
