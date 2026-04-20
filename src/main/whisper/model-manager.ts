@@ -145,7 +145,6 @@ export class WhisperModelManager {
         }
         if (attempt >= this.maxAttempts) break;
         const delay = this.backoffBaseMs * 2 ** (attempt - 1);
-        // eslint-disable-next-line no-console
         console.warn(
           `[whisper model-manager] transient download error for ${key} ` +
             `(attempt ${attempt}/${this.maxAttempts}): ${(err as Error)?.message ?? err}. ` +

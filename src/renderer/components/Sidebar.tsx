@@ -545,6 +545,9 @@ export function Sidebar({ selectedId }: SidebarProps) {
     };
     visit(tree.roots);
     return rows;
+    // isExpanded is a closure over every dep already listed; adding it would
+    // recompute on every render without changing output.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tree, expandedFolders, searching, folderPath, creatingFolder]);
 
   function focusSearch() {

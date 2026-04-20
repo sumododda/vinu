@@ -100,6 +100,7 @@ describe('Pipeline', () => {
       audio: { preprocess: vi.fn().mockResolvedValue('/tmp/a.wav') } as any,
       whisper: { transcribe: vi.fn().mockResolvedValue({ text: 't', segments: [], durationMs: 0 }) } as any,
       makeLLMClient: () => ({
+        // eslint-disable-next-line require-yield
         streamNotes: async function* () {
           throw new Error('llm bad');
         },

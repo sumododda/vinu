@@ -72,7 +72,7 @@ function setTextareaValue(textarea: HTMLTextAreaElement, value: string) {
 describe('DetailPage', () => {
   let container: HTMLDivElement;
   let root: ReturnType<typeof createRoot>;
-  let emitEvent: ((event: NotesEvent) => void) | null;
+  let _emitEvent: ((event: NotesEvent) => void) | null;
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -80,7 +80,7 @@ describe('DetailPage', () => {
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
-    emitEvent = null;
+    _emitEvent = null;
 
     mockApi.notes.get.mockReset();
     mockApi.notes.update.mockReset();
@@ -93,9 +93,9 @@ describe('DetailPage', () => {
     mockApi.folders.list.mockReset();
     mockApi.folders.create.mockReset();
     mockApi.notes.onEvent.mockImplementation((cb: (event: NotesEvent) => void) => {
-      emitEvent = cb;
+      _emitEvent = cb;
       return () => {
-        emitEvent = null;
+        _emitEvent = null;
       };
     });
     mockApi.notes.update.mockResolvedValue(undefined);

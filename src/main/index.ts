@@ -35,7 +35,7 @@ const cspDev =
   "font-src 'self' data:;";
 
 let servicesReady: Services | null = null;
-let servicesInitError: unknown = null;
+let _servicesInitError: unknown = null;
 let servicesPromise: Promise<Services> | null = null;
 
 function createShellWindow(): BrowserWindow {
@@ -139,7 +139,7 @@ function ensureServices(): Promise<Services> {
     } catch (err) {
       // Pre-init failure (before IPC handlers were registered): safe to
       // allow a future retry by resetting the promise.
-      servicesInitError = err;
+      _servicesInitError = err;
       servicesPromise = null;
       throw err;
     }
@@ -152,13 +152,13 @@ function ensureServices(): Promise<Services> {
     try {
       await recoverInterrupted(services);
     } catch (err) {
-      servicesInitError = err;
+      _servicesInitError = err;
       servicesReady = services;
       return services;
     }
 
     servicesReady = services;
-    servicesInitError = null;
+    _servicesInitError = null;
     return services;
   })();
 

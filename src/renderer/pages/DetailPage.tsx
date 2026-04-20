@@ -299,6 +299,9 @@ export function DetailPage({ id }: DetailPageProps) {
       void flushPendingSave({ reportErrors: false }).catch(() => {});
       void flushTranscriptSave({ reportErrors: false }).catch(() => {});
     };
+    // flushPendingSave / flushTranscriptSave close over refs, not state — we
+    // intentionally don't want to re-subscribe when they change identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   function onChange(next: string) {

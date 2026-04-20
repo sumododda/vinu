@@ -29,7 +29,7 @@
     "package:linux": "electron-vite build && electron-builder --linux",
     "fetch:sidecars": "node scripts/fetch-sidecars.mjs",
     "gen:icon": "node scripts/gen-icon.mjs",
-    "postinstall": "electron-builder install-app-deps",
+    "rebuild:electron": "electron-builder install-app-deps",
     "e2e": "playwright test"
   },
   "dependencies": {
@@ -43,6 +43,7 @@
   },
   "devDependencies": {
     "@electron/rebuild": "^4.0.3",
+    "@eslint/js": "^9.39.4",
     "@playwright/test": "^1.59.1",
     "@resvg/resvg-js": "^2.6.2",
     "@types/better-sqlite3": "^7.6.13",
@@ -53,13 +54,17 @@
     "electron": "^41.2.1",
     "electron-builder": "^26.8.1",
     "electron-vite": "^5.0.0",
-    "eslint": "^10.2.1",
+    "eslint": "^9.39.4",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^16.5.0",
     "jsdom": "^29.0.2",
     "playwright": "^1.59.1",
     "prettier": "^3.8.3",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "typescript": "^6.0.3",
+    "typescript-eslint": "^8.58.2",
     "vite": "^7.3.2",
     "vitest": "^4.1.4"
   },
