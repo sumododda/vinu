@@ -1,4 +1,4 @@
-import { app, BrowserWindow, session } from 'electron';
+import { app, BrowserWindow, globalShortcut, session } from 'electron';
 import { join } from 'node:path';
 import { formatBootError, renderBootHtml } from './boot-view';
 import { createServices, type Services } from './services';
@@ -129,4 +129,8 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll();
 });

@@ -1,8 +1,10 @@
-import { BrowserWindow, safeStorage } from 'electron';
+import { BrowserWindow, globalShortcut, safeStorage } from 'electron';
 import { join } from 'node:path';
 import { openDatabase } from './db';
 import { NoteStore } from './db/store';
+import { HotkeyManager } from './hotkey';
 import { registerIpcHandlers } from './ipc-handlers';
+import { IpcChannels } from '@shared/ipc';
 import type { LLMClient } from './llm/client';
 import { createLLMClient } from './llm/factory';
 import { Pipeline, type PipelineEventType } from './pipeline';
@@ -85,6 +87,28 @@ export async function createServices(getWindows: () => BrowserWindow[]): Promise
     windows: getWindows,
   });
   broadcast = handlers.broadcastNotesEvent;
+
+  const hotkey = new HotkeyManager({
+    globalShortcut,
+    onPress: () => {
+      for (const w of getWindows()) {
+        w.webContents.send(IpcChannels.HotkeyPressed);
+        if (!w.isVisible()) w.show();
+        w.focus();
+      }
+    },
+  });
+  const applyHotkey = () => {
+    const s = settings.read();
+    hotkey.apply({ enabled: s.hotkeyEnabled, accelerator: s.hotkeyAccelerator });
+  };
+  applyHotkey();
+
+  const origWrite = settings.write.bind(settings);
+  settings.write = (next) => {
+    origWrite(next);
+    applyHotkey();
+  };
 
   return { store, settings, pipeline, audioDir };
 }
