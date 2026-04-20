@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 import { runMigrations } from './db/runner';
 import initSql from './db/migrations/001_init.sql?raw';
 import foldersSql from './db/migrations/002_folders_inline.sql?raw';
+import folderTreeSql from './db/migrations/003_folder_tree.sql?raw';
 import { NoteStore } from './db/store';
 import { Pipeline } from './pipeline';
 
@@ -11,6 +12,7 @@ function freshStore(): NoteStore {
   runMigrations(db, [
     { version: 1, sql: initSql },
     { version: 2, sql: foldersSql },
+    { version: 3, sql: folderTreeSql },
   ]);
   return new NoteStore(db);
 }
@@ -110,5 +112,31 @@ describe('Pipeline', () => {
     expect(note.status).toBe('generation_failed');
     expect(note.transcript).toBe('t');
     expect(note.errorMessage).toMatch(/llm bad/);
+  });
+
+  it('regenerates a note from an edited transcript without re-running whisper', async () => {
+    store.create({ id: 'n1', audioPath: '/tmp/a.webm', durationMs: 1 });
+    store.setTranscript('n1', 'updated transcript');
+    store.setMarkdown('n1', '# Old\n\nBody', 'Old', 'm', 'p');
+
+    const whisper = { transcribe: vi.fn() };
+    const p = new Pipeline({
+      store,
+      audio: { preprocess: vi.fn() } as any,
+      whisper: whisper as any,
+      makeLLMClient: () => ({
+        streamNotes: async function* () {
+          yield { delta: '# Fresh\n\nRegenerated' };
+        },
+      } as any),
+      settings: baseSettings,
+      emit: () => {},
+    });
+
+    await p.regenerate('n1');
+
+    expect(whisper.transcribe).not.toHaveBeenCalled();
+    expect(store.get('n1')?.title).toBe('Fresh');
+    expect(store.get('n1')?.markdown).toContain('Regenerated');
   });
 });

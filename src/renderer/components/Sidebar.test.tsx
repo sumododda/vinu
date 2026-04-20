@@ -12,6 +12,9 @@ const { mockApi } = vi.hoisted(() => ({
       list: vi.fn(),
       onEvent: vi.fn(),
     },
+    folders: {
+      list: vi.fn(),
+    },
     onHotkey: vi.fn(() => () => {}),
   },
 }));
@@ -43,12 +46,14 @@ describe('Sidebar', () => {
     root = createRoot(container);
     emitEvent = null;
     mockApi.notes.list.mockReset();
+    mockApi.folders.list.mockReset();
     mockApi.notes.onEvent.mockImplementation((cb: (event: NotesEvent) => void) => {
       emitEvent = cb;
       return () => {
         emitEvent = null;
       };
     });
+    mockApi.folders.list.mockResolvedValue([]);
   });
 
   afterEach(async () => {
@@ -89,5 +94,33 @@ describe('Sidebar', () => {
 
     expect(container.textContent).toContain('First note');
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('refresh failed');
+  });
+
+  it('renders a nested folder tree with counts', async () => {
+    mockApi.notes.list.mockResolvedValue([
+      {
+        id: 'note-1',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        title: 'Nested note',
+        status: 'ready',
+        durationMs: 1_000,
+        folderId: 'child',
+        folderName: 'Child',
+      },
+    ]);
+    mockApi.folders.list.mockResolvedValue([
+      { id: 'parent', name: 'Parent', createdAt: 1, updatedAt: 1, parentId: null },
+      { id: 'child', name: 'Child', createdAt: 2, updatedAt: 2, parentId: 'parent' },
+    ]);
+
+    await act(async () => {
+      root.render(<Sidebar selectedId="note-1" />);
+    });
+    await flushPromises();
+
+    expect(container.textContent).toContain('Parent');
+    expect(container.textContent).toContain('Child');
+    expect(container.textContent).toContain('Nested note');
   });
 });

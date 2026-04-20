@@ -35,6 +35,7 @@ export interface Folder {
   createdAt: number;
   updatedAt: number;
   name: string;
+  parentId: string | null;
 }
 
 export type Provider = 'anthropic' | 'openrouter' | 'custom';

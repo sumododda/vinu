@@ -1,8 +1,15 @@
-import { type ChangeEvent, useEffect, useRef, useState } from 'react';
+import { type ChangeEvent, type DragEvent, type ClipboardEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import type { Folder, Note } from '../lib/api';
 import { extractTitle } from '@shared/title';
-import { BackIcon, CheckIcon, EditIcon, RetryIcon, TrashIcon } from '../components/Icons';
+import {
+  BackIcon,
+  CheckIcon,
+  EditIcon,
+  ImageIcon,
+  RetryIcon,
+  TrashIcon,
+} from '../components/Icons';
 import { formatDuration, formatRelativeTime } from '../lib/format';
 import { renderNoteHtml } from '../lib/note-html';
 
@@ -12,6 +19,20 @@ interface DetailPageProps {
 
 type ViewState = 'loading' | 'ready' | 'missing' | 'error';
 type HighlightColor = 'yellow' | 'green' | 'blue' | 'pink';
+type FolderOption = { id: string; label: string };
+
+const MAX_INLINE_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_INLINE_IMAGE_BATCH_BYTES = 12 * 1024 * 1024;
+const MAX_INLINE_IMAGE_COUNT = 8;
+const SAFE_INLINE_IMAGE_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/jpg',
+  'image/gif',
+  'image/webp',
+  'image/avif',
+  'image/bmp',
+]);
 
 function statusPillFor(note: Note): { label: string; variant: 'working' | 'failed' | null } {
   switch (note.status) {
@@ -36,17 +57,24 @@ export function DetailPage({ id }: DetailPageProps) {
   const [streaming, setStreaming] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
+  const [transcriptDraft, setTranscriptDraft] = useState('');
+  const [transcriptDirty, setTranscriptDirty] = useState(false);
   const [viewState, setViewState] = useState<ViewState>('loading');
   const [error, setError] = useState<string | null>(null);
   const [showFolderCreator, setShowFolderCreator] = useState(false);
   const [folderDraft, setFolderDraft] = useState('');
+  const [folderParentDraft, setFolderParentDraft] = useState('');
+  const [draggingImages, setDraggingImages] = useState(false);
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingDraft = useRef<string | null>(null);
+  const dragDepth = useRef(0);
   const currentId = useRef(id);
   const draftRef = useRef('');
   const editingRef = useRef(false);
   const noteRef = useRef<Note | null>(null);
+  const transcriptDraftRef = useRef('');
+  const transcriptDirtyRef = useRef(false);
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -54,6 +82,10 @@ export function DetailPage({ id }: DetailPageProps) {
   editingRef.current = editing;
   currentId.current = id;
   noteRef.current = note;
+  transcriptDraftRef.current = transcriptDraft;
+  transcriptDirtyRef.current = transcriptDirty;
+
+  const folderOptions = useMemo(() => flattenFolderOptions(folders), [folders]);
 
   function clearPendingSave() {
     if (saveTimer.current) {
@@ -74,6 +106,12 @@ export function DetailPage({ id }: DetailPageProps) {
     });
   }
 
+  async function saveTranscript(transcript: string) {
+    await api.notes.updateTranscript(currentId.current, transcript);
+    setTranscriptDirty(false);
+    setNote((prev) => (prev ? { ...prev, transcript } : prev));
+  }
+
   async function flushPendingSave(opts?: { reportErrors?: boolean }) {
     const reportErrors = opts?.reportErrors ?? true;
     const next = pendingDraft.current;
@@ -91,11 +129,28 @@ export function DetailPage({ id }: DetailPageProps) {
     }
   }
 
+  async function flushTranscriptSave(opts?: { reportErrors?: boolean }) {
+    const reportErrors = opts?.reportErrors ?? true;
+    if (!transcriptDirtyRef.current) return true;
+    try {
+      await saveTranscript(transcriptDraftRef.current);
+      return true;
+    } catch (err) {
+      if (reportErrors) setError(getErrorMessage(err, 'Failed to save transcript'));
+      return false;
+    }
+  }
+
   async function loadNote(
     targetId: string,
-    opts?: { preserveDraft?: boolean; background?: boolean },
+    opts?: {
+      preserveDraft?: boolean;
+      preserveTranscript?: boolean;
+      background?: boolean;
+    },
   ) {
     const preserveDraft = opts?.preserveDraft ?? false;
+    const preserveTranscript = opts?.preserveTranscript ?? false;
     const background = opts?.background ?? false;
 
     if (!background || !noteRef.current) setViewState('loading');
@@ -106,6 +161,10 @@ export function DetailPage({ id }: DetailPageProps) {
       setNote(null);
       setStreaming(null);
       if (!preserveDraft) setDraft('');
+      if (!preserveTranscript) {
+        setTranscriptDraft('');
+        setTranscriptDirty(false);
+      }
       setViewState('missing');
       return;
     }
@@ -113,6 +172,10 @@ export function DetailPage({ id }: DetailPageProps) {
     setNote(loaded);
     setStreaming(null);
     if (!preserveDraft) setDraft(loaded.markdown);
+    if (!preserveTranscript) {
+      setTranscriptDraft(loaded.transcript);
+      setTranscriptDirty(false);
+    }
     setViewState('ready');
   }
 
@@ -124,14 +187,23 @@ export function DetailPage({ id }: DetailPageProps) {
     setStreaming(null);
     setEditing(false);
     setDraft('');
+    setTranscriptDraft('');
+    setTranscriptDirty(false);
     setError(null);
     setFolderDraft('');
+    setFolderParentDraft('');
     setShowFolderCreator(false);
+    setDraggingImages(false);
+    dragDepth.current = 0;
     setViewState('loading');
     clearPendingSave();
     pendingDraft.current = null;
 
-    const refreshNote = async (opts?: { preserveDraft?: boolean; background?: boolean }) => {
+    const refreshNote = async (opts?: {
+      preserveDraft?: boolean;
+      preserveTranscript?: boolean;
+      background?: boolean;
+    }) => {
       try {
         await loadNote(id, opts);
       } catch (err) {
@@ -147,9 +219,7 @@ export function DetailPage({ id }: DetailPageProps) {
         const loadedFolders = await api.folders.list();
         if (!cancelled) setFolders(loadedFolders);
       } catch (err) {
-        if (!cancelled) {
-          setError(getErrorMessage(err, 'Failed to load folders'));
-        }
+        if (!cancelled) setError(getErrorMessage(err, 'Failed to load folders'));
       }
     };
 
@@ -164,13 +234,18 @@ export function DetailPage({ id }: DetailPageProps) {
       }
 
       setStreaming(null);
-      void refreshNote({ preserveDraft: editingRef.current, background: true });
+      void refreshNote({
+        preserveDraft: editingRef.current,
+        preserveTranscript: transcriptDirtyRef.current,
+        background: true,
+      });
     });
 
     return () => {
       cancelled = true;
       unsub();
       void flushPendingSave({ reportErrors: false }).catch(() => {});
+      void flushTranscriptSave({ reportErrors: false }).catch(() => {});
     };
   }, [id]);
 
@@ -188,6 +263,12 @@ export function DetailPage({ id }: DetailPageProps) {
         setError(getErrorMessage(err, 'Failed to save note'));
       });
     }, 500);
+  }
+
+  function onTranscriptChange(next: string) {
+    setTranscriptDraft(next);
+    setTranscriptDirty(true);
+    setError(null);
   }
 
   function applyDraftUpdate(next: string, selectionStart?: number, selectionEnd?: number) {
@@ -235,18 +316,96 @@ export function DetailPage({ id }: DetailPageProps) {
     wrapSelection(`==${color}::`, '==', 'highlighted text');
   }
 
-  async function onPickImage(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
+  async function insertImages(files: File[], fallbackLabel: string) {
+    if (files.length === 0) return;
+    if (files.length > MAX_INLINE_IMAGE_COUNT) {
+      setError(`You can insert up to ${MAX_INLINE_IMAGE_COUNT} images at once.`);
+      return;
+    }
+
+    const unsupported = files.find((file) => !SAFE_INLINE_IMAGE_TYPES.has(file.type.toLowerCase()));
+    if (unsupported) {
+      setError(`"${unsupported.name}" uses an unsupported image format. Use PNG, JPEG, GIF, WebP, AVIF, or BMP.`);
+      return;
+    }
+
+    const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+    if (totalBytes > MAX_INLINE_IMAGE_BATCH_BYTES) {
+      setError('That image batch is too large to embed inline safely.');
+      return;
+    }
+
+    const tooLarge = files.find((file) => file.size > MAX_INLINE_IMAGE_BYTES);
+    if (tooLarge) {
+      setError(`"${tooLarge.name}" is too large to embed inline. Keep each image under 5 MB.`);
+      return;
+    }
 
     try {
-      const dataUrl = await readFileAsDataUrl(file);
-      const alt = file.name.replace(/\.[^.]+$/, '') || 'Inline image';
-      insertSnippet(`\n\n![${alt}](${dataUrl})\n\n`);
-      event.target.value = '';
+      const snippets = await Promise.all(
+        files.map(async (file, index) => {
+          const dataUrl = await readFileAsDataUrl(file);
+          const alt = file.name.replace(/\.[^.]+$/, '') || `${fallbackLabel} ${index + 1}`;
+          return `![${alt}](${dataUrl})`;
+        }),
+      );
+      insertSnippet(`\n\n${snippets.join('\n\n')}\n\n`);
     } catch (err) {
       setError(getErrorMessage(err, 'Failed to read image'));
     }
+  }
+
+  async function onPickImage(event: ChangeEvent<HTMLInputElement>) {
+    const files = [...(event.target.files ?? [])].filter((file) => file.type.startsWith('image/'));
+    await insertImages(files, 'Inline image');
+    event.target.value = '';
+  }
+
+  async function onPasteImage(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const files = [...event.clipboardData.items]
+      .filter((item) => item.type.startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    if (files.length === 0) return;
+
+    event.preventDefault();
+    await insertImages(files, 'Pasted image');
+  }
+
+  function hasDraggedImages(dataTransfer: DataTransfer): boolean {
+    return [...dataTransfer.items].some((item) => item.type.startsWith('image/'))
+      || [...dataTransfer.files].some((file) => file.type.startsWith('image/'));
+  }
+
+  function onDragEnter(event: DragEvent<HTMLElement>) {
+    if (!hasDraggedImages(event.dataTransfer)) return;
+    event.preventDefault();
+    dragDepth.current += 1;
+    setDraggingImages(true);
+  }
+
+  function onDragOver(event: DragEvent<HTMLElement>) {
+    if (!hasDraggedImages(event.dataTransfer)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    setDraggingImages(true);
+  }
+
+  function onDragLeave(event: DragEvent<HTMLElement>) {
+    if (!hasDraggedImages(event.dataTransfer)) return;
+    event.preventDefault();
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDraggingImages(false);
+  }
+
+  async function onDropImages(event: DragEvent<HTMLElement>) {
+    if (!hasDraggedImages(event.dataTransfer)) return;
+    event.preventDefault();
+    dragDepth.current = 0;
+    setDraggingImages(false);
+    editorRef.current?.focus();
+    const files = [...event.dataTransfer.files].filter((file) => file.type.startsWith('image/'));
+    await insertImages(files, 'Dropped image');
   }
 
   async function onToggleEditing() {
@@ -263,6 +422,41 @@ export function DetailPage({ id }: DetailPageProps) {
       await api.notes.retry(id);
     } catch (err) {
       setError(getErrorMessage(err, 'Failed to retry note'));
+    }
+  }
+
+  async function onSaveTranscript() {
+    setError(null);
+    const saved = await flushTranscriptSave({ reportErrors: true });
+    if (!saved) return;
+  }
+
+  async function onRegenerate() {
+    if (!transcriptDraftRef.current.trim()) {
+      setError('Transcript is empty. Add or correct the transcript first.');
+      return;
+    }
+
+    const currentNote = noteRef.current;
+    const hasBody = Boolean(currentNote?.markdown.trim());
+    const hasUnsavedNoteDraft =
+      draftRef.current !== (currentNote?.markdown ?? '') || pendingDraft.current != null;
+    if (hasBody && hasUnsavedNoteDraft) {
+      const ok = confirm('Regenerating will replace the current note body with a new version from the transcript. Continue?');
+      if (!ok) return;
+    }
+
+    const transcriptSaved = await flushTranscriptSave({ reportErrors: true });
+    if (!transcriptSaved) return;
+
+    clearPendingSave();
+    pendingDraft.current = null;
+    setEditing(false);
+    setError(null);
+    try {
+      await api.notes.regenerate(id);
+    } catch (err) {
+      setError(getErrorMessage(err, 'Failed to regenerate note'));
     }
   }
 
@@ -283,7 +477,11 @@ export function DetailPage({ id }: DetailPageProps) {
     setError(null);
     try {
       await api.notes.deleteAudio(id);
-      await loadNote(id, { preserveDraft: editing, background: true });
+      await loadNote(id, {
+        preserveDraft: editing,
+        preserveTranscript: transcriptDirtyRef.current,
+        background: true,
+      });
     } catch (err) {
       setError(getErrorMessage(err, 'Failed to delete audio file'));
     }
@@ -307,18 +505,22 @@ export function DetailPage({ id }: DetailPageProps) {
 
     setError(null);
     try {
-      const folder = await api.folders.create(name);
-      setFolders((prev) => {
-        const withoutDupe = prev.filter((item) => item.id !== folder.id);
-        return [...withoutDupe, folder].sort((a, b) => a.name.localeCompare(b.name));
-      });
+      const folder = await api.folders.create(name, folderParentDraft || null);
+      setFolders((prev) => [...prev.filter((item) => item.id !== folder.id), folder]);
       await api.notes.setFolder(id, folder.id);
       setNote((prev) => (prev ? { ...prev, folderId: folder.id, folderName: folder.name } : prev));
       setFolderDraft('');
+      setFolderParentDraft(folder.id);
       setShowFolderCreator(false);
     } catch (err) {
       setError(getErrorMessage(err, 'Failed to create folder'));
     }
+  }
+
+  function openFolderCreator() {
+    setFolderDraft('');
+    setFolderParentDraft(note?.folderId ?? '');
+    setShowFolderCreator(true);
   }
 
   function navigateHome() {
@@ -353,7 +555,8 @@ export function DetailPage({ id }: DetailPageProps) {
 
   const displayTitle = note?.title || 'Untitled';
   const isUntitled = !note?.title;
-  const renderedHtml = renderNoteHtml(showStream ? streaming ?? '' : note?.markdown ?? '');
+  const renderedHtml = renderNoteHtml(showEditor ? draft : showStream ? streaming ?? '' : note?.markdown ?? '');
+  const currentFolderLabel = note?.folderName ?? 'Ungrouped';
 
   return (
     <div>
@@ -397,12 +600,8 @@ export function DetailPage({ id }: DetailPageProps) {
             <span>{formatRelativeTime(note.createdAt)}</span>
             <span className="sep" />
             <span>{formatDuration(note.durationMs)}</span>
-            {note.folderName && (
-              <>
-                <span className="sep" />
-                <span>{note.folderName}</span>
-              </>
-            )}
+            <span className="sep" />
+            <span>{currentFolderLabel}</span>
           </div>
 
           <div className="note-controls card">
@@ -415,14 +614,14 @@ export function DetailPage({ id }: DetailPageProps) {
                   onChange={(e) => void onSelectFolder(e.target.value)}
                 >
                   <option value="">Ungrouped</option>
-                  {folders.map((folder) => (
-                    <option key={folder.id} value={folder.id}>
-                      {folder.name}
+                  {folderOptions.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
                     </option>
                   ))}
                 </select>
                 {!showFolderCreator ? (
-                  <button className="solid" onClick={() => setShowFolderCreator(true)}>
+                  <button className="solid" onClick={openFolderCreator}>
                     New folder
                   </button>
                 ) : (
@@ -434,6 +633,18 @@ export function DetailPage({ id }: DetailPageProps) {
                       placeholder="Folder name"
                       aria-label="New folder name"
                     />
+                    <select
+                      value={folderParentDraft}
+                      onChange={(e) => setFolderParentDraft(e.target.value)}
+                      aria-label="Parent folder"
+                    >
+                      <option value="">Top level</option>
+                      {folderOptions.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
                     <button
                       className="primary"
                       onClick={() => void onCreateFolder()}
@@ -446,6 +657,7 @@ export function DetailPage({ id }: DetailPageProps) {
                       onClick={() => {
                         setShowFolderCreator(false);
                         setFolderDraft('');
+                        setFolderParentDraft('');
                       }}
                     >
                       Cancel
@@ -475,44 +687,69 @@ export function DetailPage({ id }: DetailPageProps) {
       )}
 
       {showEditor ? (
-        <>
-          <div className="editor-toolbar">
-            <button className="solid" onClick={() => imageInputRef.current?.click()}>
-              Inline image
-            </button>
-            <button className="highlight-button yellow" onClick={() => onHighlight('yellow')}>
-              Yellow
-            </button>
-            <button className="highlight-button green" onClick={() => onHighlight('green')}>
-              Green
-            </button>
-            <button className="highlight-button blue" onClick={() => onHighlight('blue')}>
-              Blue
-            </button>
-            <button className="highlight-button pink" onClick={() => onHighlight('pink')}>
-              Pink
-            </button>
-          </div>
-          <p className="editor-note">
-            Images are embedded inline in the note body. Highlight a word or a few lines, then pick
-            a color to wrap that selection.
-          </p>
-          <textarea
-            ref={editorRef}
-            className="editor"
-            value={draft}
-            onChange={(e) => onChange(e.target.value)}
-            spellCheck
-            autoFocus
-          />
-          <input
-            ref={imageInputRef}
+        <div className="editor-split">
+          <section
+            className={`editor-pane ${draggingImages ? 'dragging' : ''}`}
+            onDragEnter={onDragEnter}
+            onDragOver={onDragOver}
+            onDragLeave={onDragLeave}
+            onDrop={(event) => void onDropImages(event)}
+          >
+            <div className="editor-toolbar">
+              <button className="solid" onClick={() => imageInputRef.current?.click()}>
+                <ImageIcon />
+                Inline image
+              </button>
+              <button className="highlight-button yellow" onClick={() => onHighlight('yellow')}>
+                Yellow
+              </button>
+              <button className="highlight-button green" onClick={() => onHighlight('green')}>
+                Green
+              </button>
+              <button className="highlight-button blue" onClick={() => onHighlight('blue')}>
+                Blue
+              </button>
+              <button className="highlight-button pink" onClick={() => onHighlight('pink')}>
+                Pink
+              </button>
+            </div>
+            <p className="editor-note">
+              Paste or drag images straight into the editor. The preview stays live while you write.
+            </p>
+            <textarea
+              ref={editorRef}
+              className="editor"
+              value={draft}
+              onChange={(e) => onChange(e.target.value)}
+              onPaste={(event) => void onPasteImage(event)}
+              spellCheck
+              autoFocus
+            />
+            <input
+              ref={imageInputRef}
             className="visually-hidden"
             type="file"
-            accept="image/*"
+            accept=".png,.jpg,.jpeg,.gif,.webp,.avif,.bmp"
+            multiple
             onChange={(e) => void onPickImage(e)}
           />
-        </>
+            {draggingImages && (
+              <div className="drop-overlay">
+                <span>Drop images to embed them inline</span>
+              </div>
+            )}
+          </section>
+
+          <section className="preview-pane">
+            <div className="preview-label">Preview</div>
+            <article
+              className="prose rendered-note"
+              dangerouslySetInnerHTML={{
+                __html: renderedHtml || '<p class="empty-note">This note is empty.</p>',
+              }}
+            />
+          </section>
+        </div>
       ) : (
         <article
           className={`prose rendered-note ${showStream ? 'streaming-note' : ''}`}
@@ -522,12 +759,35 @@ export function DetailPage({ id }: DetailPageProps) {
         />
       )}
 
-      {note?.transcript && (
-        <details className="transcript">
-          <summary>Raw transcript</summary>
-          <pre>{note.transcript}</pre>
-        </details>
-      )}
+      <section className="transcript-card card">
+        <div className="transcript-header-row">
+          <div>
+            <h3>Transcript</h3>
+            <p className="card-desc">
+              Correct wording, add missing context, then regenerate the note from this edited transcript.
+            </p>
+          </div>
+          <div className="transcript-actions">
+            {transcriptDirty && <span className="transcript-dirty">Unsaved</span>}
+            <button className="ghost" onClick={() => void onSaveTranscript()} disabled={!transcriptDirty}>
+              Save transcript
+            </button>
+            <button
+              className="primary"
+              onClick={() => void onRegenerate()}
+              disabled={!transcriptDraft.trim() || note?.status === 'transcribing' || note?.status === 'generating'}
+            >
+              {note?.markdown ? 'Regenerate note' : 'Generate note'}
+            </button>
+          </div>
+        </div>
+        <textarea
+          className="transcript-editor"
+          value={transcriptDraft}
+          onChange={(e) => onTranscriptChange(e.target.value)}
+          spellCheck
+        />
+      </section>
 
       {note?.audioPath && (
         <div className="audio-actions">
@@ -539,6 +799,39 @@ export function DetailPage({ id }: DetailPageProps) {
       )}
     </div>
   );
+}
+
+function buildFolderChildren(folders: Folder[]): Map<string | null, Folder[]> {
+  const byParent = new Map<string | null, Folder[]>();
+  for (const folder of folders) {
+    const key = folder.parentId ?? null;
+    const bucket = byParent.get(key) ?? [];
+    bucket.push(folder);
+    byParent.set(key, bucket);
+  }
+  for (const list of byParent.values()) {
+    list.sort((a, b) => a.name.localeCompare(b.name));
+  }
+  return byParent;
+}
+
+function flattenFolderOptions(folders: Folder[]): FolderOption[] {
+  const byParent = buildFolderChildren(folders);
+  const out: FolderOption[] = [];
+
+  const visit = (parentId: string | null, depth: number) => {
+    const children = byParent.get(parentId) ?? [];
+    for (const folder of children) {
+      out.push({
+        id: folder.id,
+        label: `${'  '.repeat(depth)}${depth > 0 ? '> ' : ''}${folder.name}`,
+      });
+      visit(folder.id, depth + 1);
+    }
+  };
+
+  visit(null, 0);
+  return out;
 }
 
 function readFileAsDataUrl(file: File): Promise<string> {

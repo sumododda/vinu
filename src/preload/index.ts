@@ -8,6 +8,9 @@ const api: Api = {
     list: (opts) => ipcRenderer.invoke(IpcChannels.NotesList, opts),
     get: (id) => ipcRenderer.invoke(IpcChannels.NotesGet, id),
     update: (id, markdown) => ipcRenderer.invoke(IpcChannels.NotesUpdate, { id, markdown }),
+    updateTranscript: (id, transcript) =>
+      ipcRenderer.invoke(IpcChannels.NotesUpdateTranscript, { id, transcript }),
+    regenerate: (id) => ipcRenderer.invoke(IpcChannels.NotesRegenerate, id),
     setFolder: (id, folderId) => ipcRenderer.invoke(IpcChannels.NotesSetFolder, { id, folderId }),
     delete: (id) => ipcRenderer.invoke(IpcChannels.NotesDelete, id),
     deleteAudio: (id) => ipcRenderer.invoke(IpcChannels.NotesDeleteAudio, id),
@@ -20,7 +23,7 @@ const api: Api = {
   },
   folders: {
     list: () => ipcRenderer.invoke(IpcChannels.FoldersList),
-    create: (name) => ipcRenderer.invoke(IpcChannels.FoldersCreate, { name }),
+    create: (name, parentId) => ipcRenderer.invoke(IpcChannels.FoldersCreate, { name, parentId }),
   },
   settings: {
     get: () => ipcRenderer.invoke(IpcChannels.SettingsGet),

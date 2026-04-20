@@ -26,6 +26,7 @@ interface FolderRow {
   created_at: number;
   updated_at: number;
   name: string;
+  parent_id: string | null;
 }
 
 const NOTE_COLS = `n.id, n.created_at, n.updated_at, n.title, n.markdown, n.transcript,
@@ -70,6 +71,7 @@ function rowToFolder(r: FolderRow): Folder {
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     name: r.name,
+    parentId: r.parent_id,
   };
 }
 
@@ -144,13 +146,18 @@ export class NoteStore {
       'UPDATE notes SET audio_path=NULL, updated_at=? WHERE id=?',
     );
     this.listFoldersStmt = db.prepare(
-      'SELECT id, created_at, updated_at, name FROM folders ORDER BY lower(name) ASC, created_at ASC',
+      `SELECT id, created_at, updated_at, name, parent_id
+         FROM folders
+        ORDER BY COALESCE(parent_id, ''), lower(name) ASC, created_at ASC`,
     );
     this.getFolderByNameStmt = db.prepare(
-      'SELECT id, created_at, updated_at, name FROM folders WHERE name = ? COLLATE NOCASE',
+      `SELECT id, created_at, updated_at, name, parent_id
+         FROM folders
+        WHERE name = ? COLLATE NOCASE
+          AND ((parent_id IS NULL AND ? IS NULL) OR parent_id = ?)`,
     );
     this.createFolderStmt = db.prepare(
-      'INSERT INTO folders (id, created_at, updated_at, name) VALUES (?, ?, ?, ?)',
+      'INSERT INTO folders (id, created_at, updated_at, name, parent_id) VALUES (?, ?, ?, ?, ?)',
     );
   }
 
@@ -221,17 +228,21 @@ export class NoteStore {
     return rows.map(rowToFolder);
   }
 
-  createFolder(input: { id: string; name: string }): Folder {
-    const existing = this.getFolderByNameStmt.get(input.name) as FolderRow | undefined;
+  createFolder(input: { id: string; name: string; parentId?: string | null }): Folder {
+    const parentId = input.parentId ?? null;
+    const existing = this.getFolderByNameStmt.get(input.name, parentId, parentId) as
+      | FolderRow
+      | undefined;
     if (existing) return rowToFolder(existing);
 
     const now = Date.now();
-    this.createFolderStmt.run(input.id, now, now, input.name);
+    this.createFolderStmt.run(input.id, now, now, input.name, parentId);
     return {
       id: input.id,
       createdAt: now,
       updatedAt: now,
       name: input.name,
+      parentId,
     };
   }
 }

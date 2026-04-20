@@ -8,6 +8,7 @@ const MARKED_OPTIONS = { gfm: true, breaks: true } as const;
 const BLOCK_HIGHLIGHT_RE =
   /:::highlight (yellow|green|blue|pink)\r?\n([\s\S]+?)\r?\n:::/g;
 const INLINE_HIGHLIGHT_RE = /==(yellow|green|blue|pink)::([\s\S]+?)==/g;
+const SAFE_DATA_IMAGE_RE = /^data:image\/(?:png|jpeg|jpg|gif|webp|avif|bmp);/i;
 
 interface HighlightToken {
   key: string;
@@ -49,12 +50,12 @@ export function renderNoteHtml(markdown: string): string {
 }
 
 function renderHighlightInline(token: HighlightToken): string {
-  const content = marked.parseInline(token.content, MARKED_OPTIONS) as string;
+  const content = marked.parseInline(escapeHtml(token.content), MARKED_OPTIONS) as string;
   return `<mark class="note-highlight note-highlight-${token.color}">${content}</mark>`;
 }
 
 function renderHighlightBlock(token: HighlightToken): string {
-  const content = marked.parse(token.content, MARKED_OPTIONS) as string;
+  const content = marked.parse(escapeHtml(token.content), MARKED_OPTIONS) as string;
   return `<div class="note-highlight-block note-highlight-${token.color}">${content}</div>`;
 }
 
@@ -120,9 +121,8 @@ function sanitizeUrl(raw: string, kind: 'link' | 'image'): string | null {
   if (!value) return null;
   if (value.startsWith('#')) return value;
   if (lower.startsWith('http://') || lower.startsWith('https://')) return value;
-  if (lower.startsWith('file://')) return value;
   if (kind === 'link' && lower.startsWith('mailto:')) return value;
-  if (kind === 'image' && lower.startsWith('data:image/')) return value;
+  if (kind === 'image' && SAFE_DATA_IMAGE_RE.test(value)) return value;
   return null;
 }
 

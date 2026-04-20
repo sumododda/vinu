@@ -6,6 +6,8 @@ export const IpcChannels = {
   NotesList: 'notes:list',
   NotesGet: 'notes:get',
   NotesUpdate: 'notes:update',
+  NotesUpdateTranscript: 'notes:updateTranscript',
+  NotesRegenerate: 'notes:regenerate',
   NotesSetFolder: 'notes:setFolder',
   NotesDelete: 'notes:delete',
   NotesDeleteAudio: 'notes:deleteAudio',
@@ -33,6 +35,8 @@ export type Api = {
     list(opts?: { search?: string; limit?: number }): Promise<NoteSummary[]>;
     get(id: string): Promise<Note | null>;
     update(id: string, markdown: string): Promise<void>;
+    updateTranscript(id: string, transcript: string): Promise<void>;
+    regenerate(id: string): Promise<void>;
     setFolder(id: string, folderId: string | null): Promise<void>;
     delete(id: string): Promise<void>;
     deleteAudio(id: string): Promise<void>;
@@ -41,7 +45,7 @@ export type Api = {
   };
   folders: {
     list(): Promise<Folder[]>;
-    create(name: string): Promise<Folder>;
+    create(name: string, parentId?: string | null): Promise<Folder>;
   };
   settings: {
     get(): Promise<Settings>;

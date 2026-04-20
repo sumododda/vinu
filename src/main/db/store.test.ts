@@ -107,6 +107,14 @@ describe('NoteStore', () => {
     expect(store.list()[0]?.folderId).toBe('f1');
   });
 
+  it('stores hierarchical folder parents', () => {
+    const parent = store.createFolder({ id: 'f1', name: 'Projects' });
+    const child = store.createFolder({ id: 'f2', name: 'Q2', parentId: parent.id });
+
+    expect(store.listFolders()).toEqual([parent, child]);
+    expect(child.parentId).toBe('f1');
+  });
+
   it('search ignores inline image blobs but still finds highlighted text', () => {
     store.create({ id: 'n1', audioPath: '/tmp/1.webm', durationMs: 1 });
     store.setMarkdown(

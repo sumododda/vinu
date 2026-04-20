@@ -49,6 +49,49 @@ export class Pipeline {
       return;
     }
 
+    const generated = await this.generateFromTranscript(id, transcript, opts);
+    if (!generated) return;
+
+    // Honour keepAudioDefault: when false, drop the source audio now that the
+    // summary is safely persisted. `deleteAudio` NULLs audio_path in the DB;
+    // we additionally unlink the file on disk. Swallow unlink errors — the DB
+    // is the source of truth and the file may already be gone.
+    const settings = this.deps.settings();
+    if (!settings.keepAudioDefault && note.audioPath) {
+      await unlink(note.audioPath).catch(() => {});
+      this.deps.store.deleteAudio(id);
+    }
+
+    this.deps.emit('note:updated', { id });
+  }
+
+  async regenerate(id: string, opts?: { signal?: AbortSignal }): Promise<void> {
+    const note = this.deps.store.get(id);
+    if (!note) {
+      this.deps.emit('note:failed', { id });
+      return;
+    }
+
+    const transcript = note.transcript.trim();
+    if (!transcript) {
+      this.deps.store.updateStatus(id, 'generation_failed', 'transcript is empty');
+      this.deps.emit('note:failed', { id });
+      return;
+    }
+
+    this.deps.store.updateStatus(id, 'generating');
+    this.deps.emit('note:updated', { id });
+
+    const generated = await this.generateFromTranscript(id, transcript, opts);
+    if (!generated) return;
+    this.deps.emit('note:updated', { id });
+  }
+
+  private async generateFromTranscript(
+    id: string,
+    transcript: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<boolean> {
     let buffer = '';
     const settings = this.deps.settings();
     try {
@@ -59,22 +102,12 @@ export class Pipeline {
       }
       const title = extractTitle(buffer);
       this.deps.store.setMarkdown(id, buffer, title, settings.model, settings.provider);
+      return true;
     } catch (err) {
       this.deps.store.updateStatus(id, 'generation_failed', errorMessage(err));
       this.deps.emit('note:failed', { id });
-      return;
+      return false;
     }
-
-    // Honour keepAudioDefault: when false, drop the source audio now that the
-    // summary is safely persisted. `deleteAudio` NULLs audio_path in the DB;
-    // we additionally unlink the file on disk. Swallow unlink errors — the DB
-    // is the source of truth and the file may already be gone.
-    if (!settings.keepAudioDefault && note.audioPath) {
-      await unlink(note.audioPath).catch(() => {});
-      this.deps.store.deleteAudio(id);
-    }
-
-    this.deps.emit('note:updated', { id });
   }
 }
 

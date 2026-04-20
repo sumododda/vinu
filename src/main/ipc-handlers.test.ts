@@ -50,7 +50,7 @@ describe('registerIpcHandlers', () => {
     registerIpcHandlers({
       store: {} as any,
       settings: {} as any,
-      pipeline: { process } as any,
+      pipeline: { process, regenerate: vi.fn() } as any,
       audioDir: '/tmp/audio',
       windows: () => [],
     });
@@ -85,7 +85,7 @@ describe('registerIpcHandlers', () => {
     registerIpcHandlers({
       store: store as any,
       settings: {} as any,
-      pipeline: { process } as any,
+      pipeline: { process, regenerate: vi.fn() } as any,
       audioDir: '/tmp/audio',
       windows: () => [],
     });
@@ -114,27 +114,34 @@ describe('registerIpcHandlers', () => {
     const send = vi.fn();
     const store = {
       updateMarkdown: vi.fn(),
+      setTranscript: vi.fn(),
+      createFolder: vi.fn(),
       delete: vi.fn(),
       deleteAudio: vi.fn(),
       get: vi.fn().mockReturnValue({ audioPath: null }),
     };
+    const regenerate = vi.fn();
 
     registerIpcHandlers({
       store: store as any,
       settings: {} as any,
-      pipeline: { process: vi.fn() } as any,
+      pipeline: { process: vi.fn(), regenerate } as any,
       audioDir: '/tmp/audio',
       windows: () => [{ webContents: { send } }] as any,
     });
 
     await ipcHandlers.get(IpcChannels.NotesUpdate)!({}, { id: '11111111-1111-4111-8111-111111111111', markdown: '# Title' });
+    await ipcHandlers.get(IpcChannels.NotesUpdateTranscript)!({}, { id: '11111111-1111-4111-8111-111111111111', transcript: 'Fixed transcript' });
+    await ipcHandlers.get(IpcChannels.NotesRegenerate)!({}, '11111111-1111-4111-8111-111111111111');
     await ipcHandlers.get(IpcChannels.NotesDeleteAudio)!({}, '11111111-1111-4111-8111-111111111111');
     await ipcHandlers.get(IpcChannels.NotesDelete)!({}, '11111111-1111-4111-8111-111111111111');
 
+    expect(store.setTranscript).toHaveBeenCalledWith('11111111-1111-4111-8111-111111111111', 'Fixed transcript');
+    expect(regenerate).toHaveBeenCalledWith('11111111-1111-4111-8111-111111111111', expect.anything());
     expect(send).toHaveBeenCalledWith(IpcChannels.NotesEvent, {
       type: 'note:updated',
       payload: { id: '11111111-1111-4111-8111-111111111111' },
     });
-    expect(send).toHaveBeenCalledTimes(3);
+    expect(send).toHaveBeenCalledTimes(4);
   });
 });

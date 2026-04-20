@@ -11,6 +11,8 @@ const { mockApi } = vi.hoisted(() => ({
     notes: {
       get: vi.fn(),
       update: vi.fn(),
+      updateTranscript: vi.fn(),
+      regenerate: vi.fn(),
       setFolder: vi.fn(),
       delete: vi.fn(),
       deleteAudio: vi.fn(),
@@ -82,6 +84,8 @@ describe('DetailPage', () => {
 
     mockApi.notes.get.mockReset();
     mockApi.notes.update.mockReset();
+    mockApi.notes.updateTranscript.mockReset();
+    mockApi.notes.regenerate.mockReset();
     mockApi.notes.setFolder.mockReset();
     mockApi.notes.delete.mockReset();
     mockApi.notes.deleteAudio.mockReset();
@@ -95,12 +99,14 @@ describe('DetailPage', () => {
       };
     });
     mockApi.notes.update.mockResolvedValue(undefined);
+    mockApi.notes.updateTranscript.mockResolvedValue(undefined);
+    mockApi.notes.regenerate.mockResolvedValue(undefined);
     mockApi.notes.setFolder.mockResolvedValue(undefined);
     mockApi.notes.delete.mockResolvedValue(undefined);
     mockApi.notes.deleteAudio.mockResolvedValue(undefined);
     mockApi.notes.retry.mockResolvedValue(undefined);
     mockApi.folders.list.mockResolvedValue([]);
-    mockApi.folders.create.mockResolvedValue({ id: 'folder-1', name: 'Folder', createdAt: 1, updatedAt: 1 });
+    mockApi.folders.create.mockResolvedValue({ id: 'folder-1', name: 'Folder', createdAt: 1, updatedAt: 1, parentId: null });
     vi.stubGlobal('confirm', vi.fn(() => true));
   });
 
@@ -181,5 +187,27 @@ describe('DetailPage', () => {
 
     expect(container.textContent).toContain('Note not found');
     expect(container.textContent).not.toContain('Loading…');
+  });
+
+  it('saves the edited transcript and triggers regenerate', async () => {
+    mockApi.notes.get.mockResolvedValue(makeNote({ transcript: 'Original transcript' }));
+
+    await act(async () => {
+      root.render(<DetailPage id="note-1" />);
+    });
+    await flushPromises();
+
+    const transcriptEditor = container.querySelector('.transcript-editor') as HTMLTextAreaElement;
+    await act(async () => {
+      setTextareaValue(transcriptEditor, 'Corrected transcript');
+    });
+
+    await act(async () => {
+      getButton(container, 'Regenerate note').click();
+    });
+    await flushPromises();
+
+    expect(mockApi.notes.updateTranscript).toHaveBeenCalledWith('note-1', 'Corrected transcript');
+    expect(mockApi.notes.regenerate).toHaveBeenCalledWith('note-1');
   });
 });

@@ -167,12 +167,15 @@ export function registerIpcHandlers(deps: IpcHandlerDeps): {
     for (const w of deps.windows()) w.webContents.send(IpcChannels.NotesEvent, event);
   };
 
-  const startProcessing = (id: string): boolean => {
+  const startJob = (
+    id: string,
+    work: (opts: { signal?: AbortSignal }) => Promise<void>,
+  ): boolean => {
     if (activeJobs.has(id)) return false;
 
     const controller = new AbortController();
-    const done = deps.pipeline
-      .process(id, { signal: controller.signal })
+    const done = Promise.resolve()
+      .then(() => work({ signal: controller.signal }))
       .catch(() => {})
       .finally(() => {
         if (activeJobs.get(id)?.done === done) activeJobs.delete(id);
@@ -181,6 +184,12 @@ export function registerIpcHandlers(deps: IpcHandlerDeps): {
     activeJobs.set(id, { controller, done });
     return true;
   };
+
+  const startProcessing = (id: string): boolean =>
+    startJob(id, (opts) => deps.pipeline.process(id, opts));
+
+  const startRegeneration = (id: string): boolean =>
+    startJob(id, (opts) => deps.pipeline.regenerate(id, opts));
 
   const stopProcessing = async (id: string): Promise<void> => {
     const job = activeJobs.get(id);
@@ -236,6 +245,20 @@ export function registerIpcHandlers(deps: IpcHandlerDeps): {
     broadcastNotesEvent({ type: 'note:updated', payload: { id } });
   });
 
+  ipcMain.handle(IpcChannels.NotesUpdateTranscript, (_e, args: unknown) => {
+    const channel = IpcChannels.NotesUpdateTranscript;
+    const o = assertObject(channel, args);
+    const id = assertUuid(channel, o['id']);
+    const transcript = assertString(channel, o['transcript'], 'transcript', MAX_TEXT_BYTES);
+    deps.store.setTranscript(id, transcript);
+    broadcastNotesEvent({ type: 'note:updated', payload: { id } });
+  });
+
+  ipcMain.handle(IpcChannels.NotesRegenerate, async (_e, id: unknown) => {
+    const validId = assertUuid(IpcChannels.NotesRegenerate, id);
+    startRegeneration(validId);
+  });
+
   ipcMain.handle(IpcChannels.NotesSetFolder, (_e, args: unknown) => {
     const channel = IpcChannels.NotesSetFolder;
     const o = assertObject(channel, args);
@@ -282,8 +305,10 @@ export function registerIpcHandlers(deps: IpcHandlerDeps): {
     const channel = IpcChannels.FoldersCreate;
     const o = assertObject(channel, input);
     const name = assertString(channel, o['name'], 'name', MAX_TEXT_BYTES).trim();
+    const parentValue = o['parentId'];
+    const parentId = parentValue == null ? null : assertUuid(channel, parentValue, 'parentId');
     if (!name) throw new IpcValidationError(channel, 'name must not be empty');
-    return deps.store.createFolder({ id: uuidv4(), name });
+    return deps.store.createFolder({ id: uuidv4(), name, parentId });
   });
 
   ipcMain.handle(IpcChannels.SettingsGet, () => deps.settings.read());
