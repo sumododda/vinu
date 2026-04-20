@@ -1,15 +1,26 @@
-import { app, BrowserWindow, globalShortcut, session } from 'electron';
+import { app, BrowserWindow, globalShortcut, session, shell } from 'electron';
 import { join } from 'node:path';
+import { URL } from 'node:url';
 import { formatBootError, renderBootHtml } from './boot-view';
 import { createServices, type Services } from './services';
 
 const isDev = !app.isPackaged;
 
+// Allowed outbound API hosts for `connect-src`. We hard-allow the two
+// known provider hosts; custom user-configured `baseUrl` values are not
+// threaded here (would require settings access before CSP is installed),
+// so users pointing at a custom baseUrl will currently be blocked.
+// TODO: plumb SettingsStore to refresh CSP when baseUrl changes.
+const API_HOSTS = "https://api.anthropic.com https://api.openai.com";
+
+// NOTE: `'unsafe-inline'` in `style-src` is required because (a) the boot
+// view embeds a <style> block and (b) the React renderer uses inline
+// `style={{...}}` props in several components.
 const cspProd =
   "default-src 'self'; " +
   "script-src 'self'; " +
   "style-src 'self' 'unsafe-inline'; " +
-  "connect-src 'self' https:; " +
+  `connect-src 'self' ${API_HOSTS}; ` +
   "img-src 'self' data: blob:; " +
   "media-src 'self' blob:; " +
   "font-src 'self' data:;";
@@ -18,7 +29,7 @@ const cspDev =
   "default-src 'self'; " +
   "script-src 'self' 'unsafe-inline' 'unsafe-eval'; " +
   "style-src 'self' 'unsafe-inline'; " +
-  "connect-src 'self' https: ws: http://localhost:* ws://localhost:*; " +
+  `connect-src 'self' ${API_HOSTS} ws: http://localhost:* ws://localhost:*; ` +
   "img-src 'self' data: blob:; " +
   "media-src 'self' blob:; " +
   "font-src 'self' data:;";
@@ -28,7 +39,7 @@ let servicesInitError: unknown = null;
 let servicesPromise: Promise<Services> | null = null;
 
 function createShellWindow(): BrowserWindow {
-  return new BrowserWindow({
+  const win = new BrowserWindow({
     width: 1100,
     height: 720,
     minWidth: 720,
@@ -40,6 +51,56 @@ function createShellWindow(): BrowserWindow {
       sandbox: true,
     },
   });
+  applyNavigationLockdown(win);
+  return win;
+}
+
+function isSafeExternalUrl(rawUrl: string): boolean {
+  try {
+    const u = new URL(rawUrl);
+    return u.protocol === 'https:' || u.protocol === 'http:' || u.protocol === 'mailto:';
+  } catch {
+    return false;
+  }
+}
+
+function isAllowedInAppNavigation(rawUrl: string): boolean {
+  // Allow the dev renderer URL during development and the boot-view data: URL.
+  if (rawUrl.startsWith('data:text/html')) return true;
+  if (isDev && process.env['ELECTRON_RENDERER_URL']) {
+    if (rawUrl.startsWith(process.env['ELECTRON_RENDERER_URL'])) return true;
+  }
+  try {
+    const u = new URL(rawUrl);
+    // Packaged renderer is loaded via `loadFile` which maps to file://.
+    if (u.protocol === 'file:') return true;
+  } catch {
+    // fall through to deny
+  }
+  return false;
+}
+
+function applyNavigationLockdown(win: BrowserWindow): void {
+  const wc = win.webContents;
+  if (!wc) return; // defensive: some test environments stub BrowserWindow without webContents.
+
+  wc.on('will-navigate', (event, url) => {
+    if (isAllowedInAppNavigation(url)) return;
+    event.preventDefault();
+    if (isSafeExternalUrl(url)) {
+      void shell.openExternal(url);
+    }
+  });
+
+  if (typeof wc.setWindowOpenHandler === 'function') {
+    wc.setWindowOpenHandler(({ url }) => {
+      if (isSafeExternalUrl(url)) {
+        void shell.openExternal(url);
+      }
+      // Never spawn new BrowserWindows (which would inherit the preload).
+      return { action: 'deny' };
+    });
+  }
 }
 
 async function loadRenderer(win: BrowserWindow): Promise<void> {
@@ -72,17 +133,33 @@ function ensureServices(): Promise<Services> {
   if (servicesPromise) return servicesPromise;
 
   servicesPromise = (async () => {
+    let services: Services;
     try {
-      const services = await createServices(() => BrowserWindow.getAllWindows());
-      await recoverInterrupted(services);
-      servicesReady = services;
-      servicesInitError = null;
-      return services;
+      services = await createServices(() => BrowserWindow.getAllWindows());
     } catch (err) {
+      // Pre-init failure (before IPC handlers were registered): safe to
+      // allow a future retry by resetting the promise.
       servicesInitError = err;
       servicesPromise = null;
       throw err;
     }
+
+    // Once createServices() resolves, IPC handlers are already registered
+    // with ipcMain. If a post-init step (like recovery) throws, we must
+    // NOT null out servicesPromise — retrying would re-run registerIpcHandlers
+    // and crash on duplicate `ipcMain.handle` registration. Keep the
+    // resolved services around and surface the error without reset.
+    try {
+      await recoverInterrupted(services);
+    } catch (err) {
+      servicesInitError = err;
+      servicesReady = services;
+      return services;
+    }
+
+    servicesReady = services;
+    servicesInitError = null;
+    return services;
   })();
 
   return servicesPromise;
@@ -113,6 +190,30 @@ app.whenReady().then(async () => {
         ...details.responseHeaders,
         'Content-Security-Policy': [isDev ? cspDev : cspProd],
       },
+    });
+  });
+
+  // Permission handler: allow only microphone ("media"); deny everything else.
+  if (typeof session.defaultSession.setPermissionRequestHandler === 'function') {
+    session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+      callback(permission === 'media');
+    });
+  }
+
+  // Global lockdown for any future web-contents (e.g., webview tags).
+  app.on('web-contents-created', (_event, contents) => {
+    contents.on('will-navigate', (e, url) => {
+      if (isAllowedInAppNavigation(url)) return;
+      e.preventDefault();
+      if (isSafeExternalUrl(url)) {
+        void shell.openExternal(url);
+      }
+    });
+    contents.setWindowOpenHandler(({ url }) => {
+      if (isSafeExternalUrl(url)) {
+        void shell.openExternal(url);
+      }
+      return { action: 'deny' };
     });
   });
 

@@ -51,7 +51,10 @@ async function flushPromises() {
 function getTextInputByLabelText(container: HTMLElement, labelText: string) {
   const labels = Array.from(container.querySelectorAll('label'));
   const match = labels.find((label) => label.textContent?.includes(labelText));
-  const input = match?.querySelector('input');
+  let input = match?.querySelector('input') ?? null;
+  if (!input && match?.htmlFor) {
+    input = container.querySelector<HTMLInputElement>(`input[id="${match.htmlFor}"]`);
+  }
 
   if (!input) throw new Error(`Input not found for label: ${labelText}`);
   return input as HTMLInputElement;
@@ -114,13 +117,13 @@ describe('SettingsPage', () => {
       getRadioByLabelText(container, 'openrouter').click();
     });
 
-    const apiKey = getTextInputByLabelText(container, 'API Key');
+    const apiKey = getTextInputByLabelText(container, 'API key');
     await act(async () => {
       setInputValue(apiKey, 'sk-updated');
     });
 
     await act(async () => {
-      getButton(container, 'Save').click();
+      getButton(container, 'Save changes').click();
     });
     await flushPromises();
 
@@ -153,7 +156,7 @@ describe('SettingsPage', () => {
     await flushPromises();
 
     expect(container.querySelector('[role="alert"]')).toBeNull();
-    expect(getTextInputByLabelText(container, 'API Key').value).toBe('after-retry');
+    expect(getTextInputByLabelText(container, 'API key').value).toBe('after-retry');
   });
 
   it('shows a visible save error and re-enables saving after rejection', async () => {
@@ -166,12 +169,12 @@ describe('SettingsPage', () => {
     await flushPromises();
 
     await act(async () => {
-      getButton(container, 'Save').click();
+      getButton(container, 'Save changes').click();
     });
     await flushPromises();
 
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('save failed');
-    expect(getButton(container, 'Save').disabled).toBe(false);
+    expect(getButton(container, 'Save changes').disabled).toBe(false);
   });
 
   it('clears the saved indicator when the form is edited after save', async () => {
@@ -186,7 +189,7 @@ describe('SettingsPage', () => {
     mockApi.settings.set.mockReturnValueOnce(pendingSave.promise);
 
     await act(async () => {
-      getButton(container, 'Save').click();
+      getButton(container, 'Save changes').click();
     });
 
     expect(getButton(container, 'Saving…').disabled).toBe(true);

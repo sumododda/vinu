@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
+import { MicIcon, StopIcon } from './Icons';
 
 interface RecorderProps {
   onCreated: (id: string) => void;
@@ -7,9 +8,18 @@ interface RecorderProps {
 
 type RecorderPhase = 'idle' | 'starting' | 'recording' | 'saving';
 
+function formatElapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(s / 60);
+  const ss = s % 60;
+  return `${m}:${ss.toString().padStart(2, '0')}`;
+}
+
 export function Recorder({ onCreated }: RecorderProps) {
   const [phase, setPhase] = useState<RecorderPhase>('idle');
   const [error, setError] = useState<string | null>(null);
+  const [elapsedMs, setElapsedMs] = useState(0);
+
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -18,6 +28,7 @@ export function Recorder({ onCreated }: RecorderProps) {
   const mountedRef = useRef(true);
   const onCreatedRef = useRef(onCreated);
   const stoppedStreamsRef = useRef(new WeakSet<MediaStream>());
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   function setPhaseSafe(next: RecorderPhase) {
     phaseRef.current = next;
@@ -33,6 +44,13 @@ export function Recorder({ onCreated }: RecorderProps) {
     stoppedStreamsRef.current.add(stream);
     if (streamRef.current === stream) streamRef.current = null;
     stream.getTracks().forEach((track) => track.stop());
+  }
+
+  function clearTimer() {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
   }
 
   async function start() {
@@ -54,6 +72,7 @@ export function Recorder({ onCreated }: RecorderProps) {
       };
       mr.onstop = async () => {
         recorderRef.current = null;
+        clearTimer();
         setPhaseSafe('saving');
 
         try {
@@ -67,6 +86,7 @@ export function Recorder({ onCreated }: RecorderProps) {
         } finally {
           stopStream(stream);
           chunksRef.current = [];
+          if (mountedRef.current) setElapsedMs(0);
           setPhaseSafe('idle');
         }
       };
@@ -75,14 +95,24 @@ export function Recorder({ onCreated }: RecorderProps) {
       mr.start();
       recorderRef.current = mr;
       setPhaseSafe('recording');
+
+      // Tick the UI once a second while recording.
+      if (mountedRef.current) setElapsedMs(0);
+      timerRef.current = setInterval(() => {
+        if (mountedRef.current && phaseRef.current === 'recording') {
+          setElapsedMs(Date.now() - startTsRef.current);
+        }
+      }, 250);
     } catch (err) {
       stopStream(stream);
       recorderRef.current = null;
       chunksRef.current = [];
+      clearTimer();
+      if (mountedRef.current) setElapsedMs(0);
       setPhaseSafe('idle');
 
       if ((err as DOMException)?.name === 'NotAllowedError') {
-        setErrorSafe('Microphone access denied. Grant access in your OS settings.');
+        setErrorSafe('Microphone access denied. Grant access in System Settings.');
       } else {
         setErrorSafe(err instanceof Error ? err.message : 'Could not access microphone');
       }
@@ -94,6 +124,7 @@ export function Recorder({ onCreated }: RecorderProps) {
     const recorder = recorderRef.current;
     if (!recorder) {
       stopStream(streamRef.current);
+      clearTimer();
       setPhaseSafe('idle');
       return;
     }
@@ -115,6 +146,7 @@ export function Recorder({ onCreated }: RecorderProps) {
 
     return () => {
       mountedRef.current = false;
+      clearTimer();
       const recorder = recorderRef.current;
       recorderRef.current = null;
       if (recorder) {
@@ -130,27 +162,46 @@ export function Recorder({ onCreated }: RecorderProps) {
 
   const recording = phase === 'recording';
   const busy = phase === 'starting' || phase === 'saving';
+
+  const buttonClass = recording
+    ? 'record recording'
+    : busy
+      ? 'record busy'
+      : 'record primary';
+
   const buttonLabel =
     phase === 'starting'
       ? 'Starting…'
       : phase === 'saving'
         ? 'Saving…'
         : recording
-          ? '◼ Stop'
-          : '● Record';
-  const buttonTitle = recording ? 'Stop recording' : 'Start recording';
+          ? 'Stop'
+          : 'Record';
+
+  const buttonTitle = recording
+    ? 'Stop recording (⌘⇧N)'
+    : 'Start recording (⌘⇧N)';
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+    <div className="recorder">
       <button
-        className={recording ? '' : 'primary'}
+        className={buttonClass}
         onClick={recording ? stop : () => void start()}
         title={buttonTitle}
         disabled={busy}
       >
-        {buttonLabel}
+        {recording ? <span className="dot" /> : busy ? null : <MicIcon width={15} height={15} />}
+        {recording ? (
+          <>
+            <StopIcon width={13} height={13} />
+            {buttonLabel}
+          </>
+        ) : (
+          buttonLabel
+        )}
       </button>
-      {error && <small style={{ color: 'var(--accent)' }}>{error}</small>}
+      {recording && <div className="timer">{formatElapsed(elapsedMs)}</div>}
+      {error && <div className="error">{error}</div>}
     </div>
   );
 }

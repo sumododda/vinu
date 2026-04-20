@@ -1,3 +1,5 @@
+import type { Provider } from '@shared/types';
+
 export interface NoteChunk {
   delta: string;
 }
@@ -7,7 +9,7 @@ export interface LLMClient {
 }
 
 export interface LLMConfig {
-  provider: 'anthropic' | 'openrouter' | 'custom';
+  provider: Provider;
   apiKey: string;
   baseUrl?: string;
   model: string;

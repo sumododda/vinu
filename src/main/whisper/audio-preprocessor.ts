@@ -22,6 +22,14 @@ export class AudioPreprocessor {
     this.run = deps.run ?? runProcess;
   }
 
+  /**
+   * Run ffmpeg over `inputPath`, producing a 16 kHz mono WAV in `tmpDir`.
+   *
+   * The returned path is **caller-owned**: the preprocessor does not track or
+   * clean up produced files. The caller (see `pipeline.ts`) MUST `unlink` it
+   * once whisper has consumed it — both on success and on error/abort —
+   * otherwise `tmpDir` will grow without bound.
+   */
   async preprocess(inputPath: string, opts?: { signal?: AbortSignal }): Promise<string> {
     await mkdir(this.tmpDir, { recursive: true });
     const out = join(this.tmpDir, `${this.now()}.wav`);

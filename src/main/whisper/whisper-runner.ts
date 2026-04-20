@@ -1,3 +1,4 @@
+import { readFile, rm } from 'node:fs/promises';
 import { runProcess, type ProcessResult } from '../util/subprocess';
 
 export interface TranscriptSegment {
@@ -40,15 +41,24 @@ export class WhisperRunner {
     wavPath: string,
     opts?: { language?: string; signal?: AbortSignal },
   ): Promise<TranscriptResult> {
+    // -ojf writes the JSON to `<prefix>.json` (not stdout). -of sets the prefix.
+    const outputPrefix = wavPath.replace(/\.wav$/i, '');
+    const jsonPath = `${outputPrefix}.json`;
     const args = [
       '-m', this.modelPath,
       '-f', wavPath,
       '-ojf',
+      '-of', outputPrefix,
       '-nt',
       ...(opts?.language ? ['-l', opts.language] : []),
     ];
-    const { stdout } = await this.run(this.whisperPath, args, { signal: opts?.signal });
-    return parseWhisperJson(stdout);
+    try {
+      await this.run(this.whisperPath, args, { signal: opts?.signal });
+      const raw = await readFile(jsonPath, 'utf8');
+      return parseWhisperJson(raw);
+    } finally {
+      await rm(jsonPath, { force: true }).catch(() => {});
+    }
   }
 }
 

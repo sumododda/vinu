@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import type { Settings } from '../lib/api';
+import { BackIcon, CheckIcon } from '../components/Icons';
+import { HotkeyRecorder } from '../components/HotkeyRecorder';
 
 const PROVIDER_DEFAULTS: Record<Settings['provider'], { baseUrl: string; modelHint: string }> = {
   anthropic: { baseUrl: '', modelHint: 'claude-opus-4-7' },
@@ -62,21 +64,25 @@ export function SettingsPage() {
     };
   }, [loadVersion]);
 
-  if (isLoading) return <p>Loading…</p>;
+  if (isLoading) {
+    return (
+      <div className="empty-hero">
+        <p>Loading settings…</p>
+      </div>
+    );
+  }
 
   if (loadError) {
     return (
-      <div style={{ maxWidth: 640 }}>
-        <div className="toolbar">
-          <h2 style={{ margin: 0 }}>Settings</h2>
-          <div className="spacer" />
-          <a href="#/">Back</a>
-        </div>
-
-        <p role="alert" style={{ color: 'var(--accent)' }}>
-          {loadError}
-        </p>
-        <button onClick={() => setLoadVersion((v) => v + 1)}>Retry</button>
+      <div className="settings-page">
+        <header className="settings-header">
+          <h2>Settings</h2>
+          <a href="#/" className="back"><BackIcon /> Back</a>
+        </header>
+        <div className="alert" role="alert">{loadError}</div>
+        <button className="solid" onClick={() => setLoadVersion((v) => v + 1)}>
+          Retry
+        </button>
       </div>
     );
   }
@@ -105,107 +111,134 @@ export function SettingsPage() {
   }
 
   return (
-    <div style={{ maxWidth: 640 }}>
-      <div className="toolbar">
-        <h2 style={{ margin: 0 }}>Settings</h2>
-        <div className="spacer" />
-        <a href="#/">Back</a>
-      </div>
+    <div className="settings-page">
+      <header className="settings-header">
+        <h2>Settings</h2>
+        <a href="#/" className="back"><BackIcon /> Back</a>
+      </header>
 
-      <fieldset style={{ border: 'none', padding: 0, margin: 0 }}>
-        <legend>LLM Provider</legend>
-        <div style={{ display: 'flex', gap: 16, marginBottom: 12 }}>
-          {(['anthropic', 'openrouter', 'custom'] as const).map((p) => (
-            <label key={p}>
-              <input
-                type="radio"
-                name="provider"
-                checked={s.provider === p}
-                onChange={() => {
-                  const updatedBaseUrl = nextBaseUrl(s.baseUrl, s.provider, p);
-                  update('provider', p);
-                  if (updatedBaseUrl !== s.baseUrl) update('baseUrl', updatedBaseUrl);
-                }}
-              />{' '}
-              {p}
-            </label>
-          ))}
+      <section className="card">
+        <h3>LLM provider</h3>
+        <p className="card-desc">Choose where summaries are generated. Keys stay on this machine.</p>
+
+        <div className="field">
+          <span className="field-label">Provider</span>
+          <div className="segment" role="radiogroup" aria-label="LLM provider">
+            {(['anthropic', 'openrouter', 'custom'] as const).map((p) => (
+              <label key={p}>
+                <input
+                  type="radio"
+                  name="provider"
+                  checked={s.provider === p}
+                  onChange={() => {
+                    const updatedBaseUrl = nextBaseUrl(s.baseUrl, s.provider, p);
+                    update('provider', p);
+                    if (updatedBaseUrl !== s.baseUrl) update('baseUrl', updatedBaseUrl);
+                  }}
+                />
+                {p}
+              </label>
+            ))}
+          </div>
         </div>
 
-        <label>
-          API Key
+        <div className="field">
+          <label htmlFor="apiKey">API key</label>
           <input
+            id="apiKey"
             type="password"
             value={s.apiKey}
             onChange={(e) => update('apiKey', e.target.value)}
             placeholder="sk-…"
+            autoComplete="off"
+            spellCheck={false}
           />
-        </label>
-        <small style={{ display: 'block', marginTop: 6, color: 'var(--muted)' }}>
-          Stored locally and encrypted when your OS keychain/keyring is available.
-        </small>
+          <span className="hint">
+            Encrypted at rest via your OS keychain. Never leaves your machine
+            except directly to the provider you choose above.
+          </span>
+        </div>
 
-        <label style={{ marginTop: 8, display: 'block' }}>
-          Base URL
+        <div className="field">
+          <label htmlFor="baseUrl">Base URL</label>
           <input
+            id="baseUrl"
+            type="text"
             value={s.baseUrl}
             onChange={(e) => update('baseUrl', e.target.value)}
             placeholder={PROVIDER_DEFAULTS[s.provider].baseUrl || 'SDK default'}
             disabled={s.provider === 'anthropic'}
+            spellCheck={false}
           />
-        </label>
+        </div>
 
-        <label style={{ marginTop: 8, display: 'block' }}>
-          Model
+        <div className="field">
+          <label htmlFor="model">Model</label>
           <input
+            id="model"
+            type="text"
             value={s.model}
             onChange={(e) => update('model', e.target.value)}
             placeholder={PROVIDER_DEFAULTS[s.provider].modelHint}
+            spellCheck={false}
           />
-        </label>
-      </fieldset>
+        </div>
+      </section>
 
-      <fieldset style={{ border: 'none', padding: 0, marginTop: 24 }}>
-        <legend>Recording</legend>
-        <label>
-          <input
-            type="checkbox"
-            checked={s.hotkeyEnabled}
-            onChange={(e) => update('hotkeyEnabled', e.target.checked)}
-          />{' '}
-          Enable global hotkey
-        </label>
-        <label style={{ display: 'block', marginTop: 8 }}>
-          Hotkey
-          <input
+      <section className="card">
+        <h3>Recording</h3>
+        <p className="card-desc">Global hotkey and audio retention.</p>
+
+        <div className="field">
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={s.hotkeyEnabled}
+              onChange={(e) => update('hotkeyEnabled', e.target.checked)}
+            />
+            Enable global hotkey
+          </label>
+        </div>
+
+        <div className="field">
+          <span className="field-label">Shortcut</span>
+          <HotkeyRecorder
             value={s.hotkeyAccelerator}
-            onChange={(e) => update('hotkeyAccelerator', e.target.value)}
             disabled={!s.hotkeyEnabled}
-            placeholder="CommandOrControl+Shift+N"
+            onChange={(next) => update('hotkeyAccelerator', next)}
           />
-        </label>
-        <label style={{ display: 'block', marginTop: 8 }}>
-          <input
-            type="checkbox"
-            checked={s.keepAudioDefault}
-            onChange={(e) => update('keepAudioDefault', e.target.checked)}
-          />{' '}
-          Keep audio files by default (you can delete per-note)
-        </label>
-      </fieldset>
+          <span className="hint">
+            Click <em>Change</em> and press your combination. Use at least one modifier
+            (⌘, ⌥, ⌃, or ⇧) plus a key. Press <kbd>Esc</kbd> to cancel.
+          </span>
+        </div>
 
-      <div style={{ marginTop: 24 }}>
-        <button className="primary" onClick={save} disabled={isSaving}>
-          {isSaving ? 'Saving…' : 'Save'}
+        <div className="field">
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={s.keepAudioDefault}
+              onChange={(e) => update('keepAudioDefault', e.target.checked)}
+            />
+            Keep audio files after transcription
+          </label>
+          <span className="hint">
+            When off, the original recording is removed once the summary is generated.
+          </span>
+        </div>
+      </section>
+
+      <div className="save-bar">
+        <button className="primary" onClick={() => void save()} disabled={isSaving}>
+          {isSaving ? null : <CheckIcon />}
+          {isSaving ? 'Saving…' : 'Save changes'}
         </button>
         {saveError && (
-          <small role="alert" style={{ marginLeft: 8, color: 'var(--accent)' }}>
+          <span className="status error" role="alert">
             {saveError}
-          </small>
+          </span>
         )}
-        {savedAt && (
-          <small style={{ marginLeft: 8, color: 'var(--muted)' }}>Saved.</small>
-        )}
+        {savedAt && !saveError && <span className="status">Saved.</span>}
       </div>
     </div>
   );

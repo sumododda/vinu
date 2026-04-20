@@ -37,11 +37,10 @@ export async function createServices(getWindows: () => BrowserWindow[]): Promise
   const modelManager = new WhisperModelManager({
     dir: userDataPath('models'),
     registry: MODEL_REGISTRY,
-    onProgress: (key, bytes) => {
-      for (const w of getWindows()) {
-        w.webContents.send('model:progress', { key, bytes });
-      }
-    },
+    // Note: no `onProgress` — the boot view is a static data: URL that
+    // cannot subscribe to 'model:progress' events, so the emit was dead.
+    // First-run download UX will need to be surfaced through a real
+    // renderer channel when we add one.
   });
 
   const modelPath = await modelManager.ensure(DEFAULT_MODEL_KEY);
@@ -104,6 +103,10 @@ export async function createServices(getWindows: () => BrowserWindow[]): Promise
   };
   applyHotkey();
 
+  // TODO: replace this monkey-patch with a proper `onChange` observer on
+  // `SettingsStore` (see src/main/settings.ts). SettingsStore is owned by a
+  // different agent; once it exposes `onChange(listener)`, remove the patch
+  // below and call `settings.onChange(applyHotkey)` instead.
   const origWrite = settings.write.bind(settings);
   settings.write = (next) => {
     origWrite(next);

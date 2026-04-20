@@ -1,12 +1,32 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import type { Note } from '../lib/api';
+import { extractTitle } from '@shared/title';
+import { BackIcon, CheckIcon, EditIcon, RetryIcon, TrashIcon } from '../components/Icons';
+import { formatDuration, formatRelativeTime } from '../lib/format';
 
 interface DetailPageProps {
   id: string;
 }
 
 type ViewState = 'loading' | 'ready' | 'missing' | 'error';
+
+function statusPillFor(note: Note): { label: string; variant: 'working' | 'failed' | null } {
+  switch (note.status) {
+    case 'transcribing':
+      return { label: 'Transcribing', variant: 'working' };
+    case 'generating':
+      return { label: 'Generating', variant: 'working' };
+    case 'transcription_failed':
+      return { label: 'Transcription failed', variant: 'failed' };
+    case 'generation_failed':
+      return { label: 'Generation failed', variant: 'failed' };
+    case 'pending_network':
+      return { label: 'Waiting for network', variant: 'working' };
+    default:
+      return { label: '', variant: null };
+  }
+}
 
 export function DetailPage({ id }: DetailPageProps) {
   const [note, setNote] = useState<Note | null>(null);
@@ -64,7 +84,10 @@ export function DetailPage({ id }: DetailPageProps) {
     }
   }
 
-  async function loadNote(targetId: string, opts?: { preserveDraft?: boolean; background?: boolean }) {
+  async function loadNote(
+    targetId: string,
+    opts?: { preserveDraft?: boolean; background?: boolean },
+  ) {
     const preserveDraft = opts?.preserveDraft ?? false;
     const background = opts?.background ?? false;
 
@@ -125,7 +148,7 @@ export function DetailPage({ id }: DetailPageProps) {
     return () => {
       cancelled = true;
       unsub();
-      void flushPendingSave({ reportErrors: false });
+      void flushPendingSave({ reportErrors: false }).catch(() => {});
     };
   }, [id]);
 
@@ -185,68 +208,132 @@ export function DetailPage({ id }: DetailPageProps) {
     }
   }
 
-  if (viewState === 'loading') return <p>Loading…</p>;
-  if (viewState === 'missing') return <p>Note not found.</p>;
+  function navigateHome() {
+    window.location.hash = '#/';
+  }
+
+  if (viewState === 'loading') {
+    return (
+      <div className="empty-hero">
+        <p>Loading note…</p>
+      </div>
+    );
+  }
+  if (viewState === 'missing') {
+    return (
+      <div className="empty-hero">
+        <h1>Note not found</h1>
+        <p>This note may have been deleted.</p>
+        <button className="solid" onClick={navigateHome}>
+          <BackIcon /> Back to notes
+        </button>
+      </div>
+    );
+  }
+
+  const pill = note ? statusPillFor(note) : null;
+  const showEditor = note?.status === 'ready' && editing;
+  const showStream = note?.status === 'generating' && streaming;
+  const canEdit = note?.status === 'ready';
+  const canRetry =
+    note?.status === 'transcription_failed' || note?.status === 'generation_failed';
+
+  const displayTitle = note?.title || 'Untitled';
+  const isUntitled = !note?.title;
 
   return (
     <div>
-      {error && (
-        <p style={{ color: 'var(--accent)' }} role="alert">
-          {error}
-        </p>
-      )}
-
-      {viewState === 'error' && !note ? <p>Unable to load note.</p> : null}
+      <div className="detail-toolbar">
+        <button className="icon ghost" onClick={navigateHome} aria-label="Back to notes" title="Back">
+          <BackIcon />
+        </button>
+        <div className="crumb">Notes</div>
+        {pill && pill.variant && (
+          <div className={`status-pill ${pill.variant}`}>
+            {pill.variant === 'working' && <span className="orbit" />}
+            {pill.label}
+          </div>
+        )}
+        {canEdit && (
+          <button className="ghost" onClick={() => void onToggleEditing()}>
+            {editing ? <CheckIcon /> : <EditIcon />}
+            {editing ? 'Done' : 'Edit'}
+          </button>
+        )}
+        {canRetry && (
+          <button className="ghost" onClick={() => void onRetry()}>
+            <RetryIcon />
+            Retry
+          </button>
+        )}
+        <button
+          className="icon ghost"
+          onClick={() => void onDelete()}
+          aria-label="Delete note"
+          title="Delete"
+        >
+          <TrashIcon />
+        </button>
+      </div>
 
       {note && (
         <>
-          <div className="toolbar">
-            <strong>{note.title || 'Untitled'}</strong>
-            <div className="spacer" />
-            {note.status === 'ready' && (
-              <button onClick={() => void onToggleEditing()}>{editing ? 'Done' : 'Edit'}</button>
-            )}
-            {(note.status === 'transcription_failed' || note.status === 'generation_failed') && (
-              <button onClick={() => void onRetry()}>Retry</button>
-            )}
-            <button onClick={() => void onDelete()}>Delete</button>
+          <h1 className={`note-title ${isUntitled ? 'untitled' : ''}`}>{displayTitle}</h1>
+          <div className="note-subhead">
+            <span>{formatRelativeTime(note.createdAt)}</span>
+            <span className="sep" />
+            <span>{formatDuration(note.durationMs)}</span>
           </div>
-
-          {note.status !== 'ready' && (
-            <p style={{ color: 'var(--muted)' }}>
-              Status: {note.status}
-              {note.errorMessage ? ` — ${note.errorMessage}` : null}
-            </p>
-          )}
-
-          {note.status === 'generating' && streaming ? (
-            <pre style={{ whiteSpace: 'pre-wrap', font: 'inherit' }}>{streaming}</pre>
-          ) : editing ? (
-            <textarea className="editor" value={draft} onChange={(e) => onChange(e.target.value)} />
-          ) : (
-            <pre style={{ whiteSpace: 'pre-wrap', font: 'inherit' }}>{note.markdown || ''}</pre>
-          )}
-
-          {note.transcript && (
-            <details style={{ marginTop: 24 }}>
-              <summary style={{ color: 'var(--muted)' }}>Show raw transcript</summary>
-              <pre style={{ whiteSpace: 'pre-wrap' }}>{note.transcript}</pre>
-            </details>
-          )}
-
-          {note.audioPath && (
-            <div style={{ marginTop: 16 }}>
-              <button onClick={() => void onDeleteAudio()}>Delete audio file</button>
-            </div>
-          )}
         </>
+      )}
+
+      {error && (
+        <div className="alert" role="alert">
+          {error}
+        </div>
+      )}
+
+      {viewState === 'error' && !note && (
+        <div className="alert muted">Unable to load note.</div>
+      )}
+
+      {note && note.status !== 'ready' && note.errorMessage && (
+        <div className="alert" role="alert">
+          {note.errorMessage}
+        </div>
+      )}
+
+      {note && (showStream ? (
+        <pre className="prose">{streaming}</pre>
+      ) : showEditor ? (
+        <textarea
+          className="editor"
+          value={draft}
+          onChange={(e) => onChange(e.target.value)}
+          spellCheck
+          autoFocus
+        />
+      ) : (
+        <pre className="prose">{note.markdown || ''}</pre>
+      ))}
+
+      {note?.transcript && (
+        <details className="transcript">
+          <summary>Raw transcript</summary>
+          <pre>{note.transcript}</pre>
+        </details>
+      )}
+
+      {note?.audioPath && (
+        <div className="audio-actions">
+          <button className="ghost" onClick={() => void onDeleteAudio()}>
+            <TrashIcon />
+            Delete audio file
+          </button>
+        </div>
       )}
     </div>
   );
-}
-
-function extractTitle(markdown: string): string {
-  return (markdown.match(/^#\s+(.+?)\s*$/m)?.[1] ?? 'Untitled').trim();
 }
 
 function getErrorMessage(err: unknown, fallback: string): string {

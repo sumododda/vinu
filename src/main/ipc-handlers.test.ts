@@ -55,8 +55,8 @@ describe('registerIpcHandlers', () => {
     });
 
     const retry = ipcHandlers.get(IpcChannels.NotesRetry)!;
-    await retry({}, 'n-1');
-    await retry({}, 'n-1');
+    await retry({}, '11111111-1111-4111-8111-111111111111');
+    await retry({}, '11111111-1111-4111-8111-111111111111');
 
     expect(process).toHaveBeenCalledTimes(1);
 
@@ -90,9 +90,9 @@ describe('registerIpcHandlers', () => {
     });
 
     const retry = ipcHandlers.get(IpcChannels.NotesRetry)!;
-    await retry({}, 'n-1');
+    await retry({}, '11111111-1111-4111-8111-111111111111');
 
-    const del = ipcHandlers.get(IpcChannels.NotesDelete)!({}, 'n-1');
+    const del = ipcHandlers.get(IpcChannels.NotesDelete)!({}, '11111111-1111-4111-8111-111111111111');
     expect(capturedSignal?.aborted).toBe(true);
 
     await Promise.resolve();
@@ -102,7 +102,7 @@ describe('registerIpcHandlers', () => {
     await del;
 
     expect(unlink).toHaveBeenCalledWith('/tmp/audio/n-1.webm');
-    expect(store.delete).toHaveBeenCalledWith('n-1');
+    expect(store.delete).toHaveBeenCalledWith('11111111-1111-4111-8111-111111111111');
   });
 
   it('broadcasts note update events after direct note mutations', async () => {
@@ -124,13 +124,13 @@ describe('registerIpcHandlers', () => {
       windows: () => [{ webContents: { send } }] as any,
     });
 
-    await ipcHandlers.get(IpcChannels.NotesUpdate)!({}, { id: 'n-1', markdown: '# Title' });
-    await ipcHandlers.get(IpcChannels.NotesDeleteAudio)!({}, 'n-1');
-    await ipcHandlers.get(IpcChannels.NotesDelete)!({}, 'n-1');
+    await ipcHandlers.get(IpcChannels.NotesUpdate)!({}, { id: '11111111-1111-4111-8111-111111111111', markdown: '# Title' });
+    await ipcHandlers.get(IpcChannels.NotesDeleteAudio)!({}, '11111111-1111-4111-8111-111111111111');
+    await ipcHandlers.get(IpcChannels.NotesDelete)!({}, '11111111-1111-4111-8111-111111111111');
 
     expect(send).toHaveBeenCalledWith(IpcChannels.NotesEvent, {
       type: 'note:updated',
-      payload: { id: 'n-1' },
+      payload: { id: '11111111-1111-4111-8111-111111111111' },
     });
     expect(send).toHaveBeenCalledTimes(3);
   });

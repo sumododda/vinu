@@ -166,7 +166,7 @@ describe('DetailPage', () => {
     });
     await flushPromises();
 
-    expect(container.textContent).toContain('Note not found.');
+    expect(container.textContent).toContain('Note not found');
     expect(container.textContent).not.toContain('Loading…');
   });
 });

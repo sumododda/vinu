@@ -174,6 +174,6 @@ describe('Recorder', () => {
     expect(mockApi.notes.create).toHaveBeenCalledTimes(1);
     expect(onCreated).toHaveBeenCalledWith('note-1');
     expect(stop).toHaveBeenCalledTimes(1);
-    expect(container.querySelector('button')!.textContent).toBe('● Record');
+    expect(container.querySelector('button')!.textContent).toBe('Record');
   });
 });

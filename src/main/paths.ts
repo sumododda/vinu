@@ -22,5 +22,8 @@ export function platformBinaryDir(): string {
   const key = `${platform}-${arch}`;
   const folder = map[key];
   if (!folder) throw new Error(`Unsupported platform: ${key}`);
-  return resourcePath('resources', 'bin', folder);
+  // In packaged builds, `extraResources` drops the tree under Contents/Resources/bin
+  // so `resources/` is dev-only and must not be in the packaged path.
+  if (app.isPackaged) return join(process.resourcesPath, 'bin', folder);
+  return join(__dirname, '..', '..', 'resources', 'bin', folder);
 }
