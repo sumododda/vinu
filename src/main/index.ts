@@ -1,5 +1,6 @@
 import { app, BrowserWindow, session } from 'electron';
 import { join } from 'node:path';
+import { formatBootError, renderBootHtml } from './boot-view';
 import { createServices, type Services } from './services';
 
 const isDev = !app.isPackaged;
@@ -22,8 +23,12 @@ const cspDev =
   "media-src 'self' blob:; " +
   "font-src 'self' data:;";
 
-async function createMainWindow(): Promise<BrowserWindow> {
-  const win = new BrowserWindow({
+let servicesReady: Services | null = null;
+let servicesInitError: unknown = null;
+let servicesPromise: Promise<Services> | null = null;
+
+function createShellWindow(): BrowserWindow {
+  return new BrowserWindow({
     width: 1100,
     height: 720,
     minWidth: 720,
@@ -35,14 +40,14 @@ async function createMainWindow(): Promise<BrowserWindow> {
       sandbox: true,
     },
   });
+}
 
+async function loadRenderer(win: BrowserWindow): Promise<void> {
   if (isDev && process.env['ELECTRON_RENDERER_URL']) {
     await win.loadURL(process.env['ELECTRON_RENDERER_URL']);
   } else {
     await win.loadFile(join(__dirname, '../renderer/index.html'));
   }
-
-  return win;
 }
 
 async function recoverInterrupted(services: Services): Promise<void> {
@@ -58,6 +63,53 @@ async function recoverInterrupted(services: Services): Promise<void> {
   }
 }
 
+async function loadBootView(win: BrowserWindow, state: Parameters<typeof renderBootHtml>[0]): Promise<void> {
+  await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(renderBootHtml(state))}`);
+}
+
+function ensureServices(): Promise<Services> {
+  if (servicesReady) return Promise.resolve(servicesReady);
+  if (servicesPromise) return servicesPromise;
+
+  servicesPromise = (async () => {
+    try {
+      const services = await createServices(() => BrowserWindow.getAllWindows());
+      await recoverInterrupted(services);
+      servicesReady = services;
+      servicesInitError = null;
+      return services;
+    } catch (err) {
+      servicesInitError = err;
+      throw err;
+    }
+  })();
+
+  return servicesPromise;
+}
+
+async function syncWindowToAppState(win: BrowserWindow): Promise<void> {
+  if (servicesReady) {
+    await loadRenderer(win);
+    return;
+  }
+
+  if (servicesInitError) {
+    await loadBootView(win, { kind: 'error', message: formatBootError(servicesInitError) });
+    return;
+  }
+
+  await loadBootView(win, { kind: 'loading' });
+
+  try {
+    await ensureServices();
+    if (!win.isDestroyed()) await loadRenderer(win);
+  } catch (err) {
+    if (!win.isDestroyed()) {
+      await loadBootView(win, { kind: 'error', message: formatBootError(err) });
+    }
+  }
+}
+
 app.whenReady().then(async () => {
   session.defaultSession.webRequest.onHeadersReceived((details, cb) => {
     cb({
@@ -68,14 +120,15 @@ app.whenReady().then(async () => {
     });
   });
 
-  const services = await createServices(() => BrowserWindow.getAllWindows());
-  await recoverInterrupted(services);
-
-  await createMainWindow();
-
   app.on('activate', async () => {
-    if (BrowserWindow.getAllWindows().length === 0) await createMainWindow();
+    if (BrowserWindow.getAllWindows().length === 0) {
+      const nextWindow = createShellWindow();
+      await syncWindowToAppState(nextWindow);
+    }
   });
+
+  const win = createShellWindow();
+  await syncWindowToAppState(win);
 });
 
 app.on('window-all-closed', () => {

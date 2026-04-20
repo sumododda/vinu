@@ -18,8 +18,38 @@ export interface IpcHandlerDeps {
 export function registerIpcHandlers(deps: IpcHandlerDeps): {
   broadcastNotesEvent: (e: NotesEvent) => void;
 } {
+  const activeJobs = new Map<
+    string,
+    {
+      controller: AbortController;
+      done: Promise<void>;
+    }
+  >();
+
   const broadcastNotesEvent = (event: NotesEvent) => {
     for (const w of deps.windows()) w.webContents.send(IpcChannels.NotesEvent, event);
+  };
+
+  const startProcessing = (id: string): boolean => {
+    if (activeJobs.has(id)) return false;
+
+    const controller = new AbortController();
+    const done = deps.pipeline
+      .process(id, { signal: controller.signal })
+      .catch(() => {})
+      .finally(() => {
+        if (activeJobs.get(id)?.done === done) activeJobs.delete(id);
+      });
+
+    activeJobs.set(id, { controller, done });
+    return true;
+  };
+
+  const stopProcessing = async (id: string): Promise<void> => {
+    const job = activeJobs.get(id);
+    if (!job) return;
+    job.controller.abort();
+    await job.done;
   };
 
   ipcMain.handle(IpcChannels.AppPing, () => 'pong' as const);
@@ -30,7 +60,7 @@ export function registerIpcHandlers(deps: IpcHandlerDeps): {
     const path = join(deps.audioDir, `${id}.webm`);
     await writeFile(path, Buffer.from(input.audio));
     deps.store.create({ id, audioPath: path, durationMs: input.durationMs });
-    void deps.pipeline.process(id);
+    startProcessing(id);
     return { id };
   });
 
@@ -47,18 +77,20 @@ export function registerIpcHandlers(deps: IpcHandlerDeps): {
 
   ipcMain.handle(IpcChannels.NotesDelete, async (_e, id: string) => {
     const note = deps.store.get(id);
+    await stopProcessing(id);
     if (note?.audioPath) await unlink(note.audioPath).catch(() => {});
     deps.store.delete(id);
   });
 
   ipcMain.handle(IpcChannels.NotesDeleteAudio, async (_e, id: string) => {
     const note = deps.store.get(id);
+    await stopProcessing(id);
     if (note?.audioPath) await unlink(note.audioPath).catch(() => {});
     deps.store.deleteAudio(id);
   });
 
   ipcMain.handle(IpcChannels.NotesRetry, async (_e, id: string) => {
-    void deps.pipeline.process(id);
+    startProcessing(id);
   });
 
   ipcMain.handle(IpcChannels.SettingsGet, () => deps.settings.read());
