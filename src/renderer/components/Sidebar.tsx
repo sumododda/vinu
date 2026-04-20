@@ -11,15 +11,35 @@ interface SidebarProps {
 export function Sidebar({ selectedId }: SidebarProps) {
   const [search, setSearch] = useState('');
   const [notes, setNotes] = useState<NoteSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    const refresh = () =>
-      api.notes.list({ search }).then((result) => {
+
+    const refresh = async () => {
+      if (!cancelled) {
+        setLoading(true);
+        setError(null);
+      }
+
+      try {
+        const result = await api.notes.list({ search });
         if (!cancelled) setNotes(result);
-      });
-    refresh();
-    const unsub = api.notes.onEvent(() => refresh());
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : 'Failed to load notes');
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    void refresh();
+    const unsub = api.notes.onEvent(() => {
+      void refresh();
+    });
+
     return () => {
       cancelled = true;
       unsub();
@@ -50,6 +70,12 @@ export function Sidebar({ selectedId }: SidebarProps) {
         </button>
       </div>
       <div className="notes-list">
+        {loading && notes.length === 0 && <p style={{ padding: 12, margin: 0 }}>Loading notes…</p>}
+        {error && (
+          <p style={{ padding: 12, margin: 0, color: 'var(--accent)' }} role="alert">
+            {error}
+          </p>
+        )}
         {notes.map((n) => (
           <a
             key={n.id}
