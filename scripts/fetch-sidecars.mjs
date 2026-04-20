@@ -1,4 +1,4 @@
-import { mkdir, chmod, stat, rm, rename, readFile } from 'node:fs/promises';
+import { mkdir, chmod, stat, rm, rename, copyFile, readFile } from 'node:fs/promises';
 import { existsSync, createWriteStream, createReadStream, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { pipeline } from 'node:stream/promises';
@@ -76,7 +76,7 @@ async function fetchFfmpeg(entry) {
 
   const found = findFile(tmp, entry.binaryName);
   if (!found) throw new Error(`ffmpeg binary (${entry.binaryName}) not found after extraction`);
-  await rename(found, dest);
+  await moveFile(found, dest);
 
   if (process.platform !== 'win32') await chmod(dest, 0o755);
   await rm(tmp, { recursive: true, force: true });
@@ -110,7 +110,7 @@ async function fetchWhisper() {
     runOrThrow('unzip', ['-o', '-q', archive, '-d', tmp]);
     const found = findFile(tmp, entry.binaryName);
     if (!found) throw new Error(`whisper binary (${entry.binaryName}) not found after extraction`);
-    await rename(found, dest);
+    await moveFile(found, dest);
 
     if (process.platform !== 'win32') await chmod(dest, 0o755);
     await rm(tmp, { recursive: true, force: true });
@@ -151,7 +151,7 @@ async function buildWhisperFromSource(dest) {
 
   const built = findFile(join(tmp, 'build', 'bin'), 'whisper-cli');
   if (!built) throw new Error(`whisper-cli binary not found after build`);
-  await rename(built, dest);
+  await moveFile(built, dest);
   if (process.platform !== 'win32') await chmod(dest, 0o755);
   await rm(tmp, { recursive: true, force: true });
   console.log(`fetch-sidecars: whisper built and ready at ${dest}`);
@@ -167,6 +167,25 @@ function detectCpuCount() {
     if (n.status === 0 && n.stdout.trim()) return parseInt(n.stdout.trim(), 10) || 4;
   } catch {}
   return 4;
+}
+
+/**
+ * Move a file across volumes. `fs.rename` fails with EXDEV when the source
+ * (system temp) and destination (workspace, on a different drive) are on
+ * different filesystems — this is hit on Windows runners where temp is on
+ * C: and GITHUB_WORKSPACE is on D:. Fall back to copy+unlink in that case.
+ */
+async function moveFile(from, to) {
+  try {
+    await rename(from, to);
+  } catch (err) {
+    if (err && err.code === 'EXDEV') {
+      await copyFile(from, to);
+      await rm(from, { force: true });
+      return;
+    }
+    throw err;
+  }
 }
 
 function runOrThrow(cmd, args, opts = {}) {

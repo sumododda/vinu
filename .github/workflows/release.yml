@@ -27,13 +27,10 @@ jobs:
         include:
           - os: macos-latest
             platform: mac
-            package_args: --mac --arm64 --x64
           - os: windows-latest
             platform: win
-            package_args: --win
           - os: ubuntu-latest
             platform: linux
-            package_args: --linux
 
     steps:
       - uses: actions/checkout@v6
@@ -62,27 +59,45 @@ jobs:
       - name: Build renderer + main
         run: npm run build
 
-      - name: Package + publish
-        # `--publish always` makes electron-builder upload to the GitHub Release
-        # configured in electron-builder.cjs `publish.provider: github`.
-        # Each matrix runner uploads its own artifacts; electron-builder
-        # creates the release on first upload and appends on subsequent runs.
-        run: npx electron-builder ${{ matrix.package_args }} --publish always
+      # ─── per-platform package + publish ────────────────────────────────
+      # Each platform has its own step so we can (a) scope signing env vars
+      # to the matching OS and (b) unset empty secrets before electron-builder
+      # sees them — otherwise it treats empty-string CSC_LINK as a filepath
+      # and crashes resolving an empty path.
+
+      - name: Package + publish (mac)
+        if: matrix.platform == 'mac'
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-          # ─── macOS signing + notarization ─────────────────────────────────
-          # When unset, electron-builder.cjs falls back to ad-hoc (unsigned)
-          # so the job still produces a usable DMG. Set these secrets in the
-          # repo settings to ship a proper Developer-ID signed + notarized
-          # build (see README "Release" section).
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
           CSC_NAME: ${{ secrets.CSC_NAME }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for v in CSC_LINK CSC_KEY_PASSWORD CSC_NAME APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!v}" ]; then unset "$v"; fi
+          done
+          npx electron-builder --mac --arm64 --x64 --publish always
 
-          # ─── Windows Authenticode signing ─────────────────────────────────
+      - name: Package + publish (win)
+        if: matrix.platform == 'win'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: |
+          for v in WIN_CSC_LINK WIN_CSC_KEY_PASSWORD; do
+            if [ -z "${!v}" ]; then unset "$v"; fi
+          done
+          npx electron-builder --win --publish always
+
+      - name: Package + publish (linux)
+        if: matrix.platform == 'linux'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --linux --publish always
