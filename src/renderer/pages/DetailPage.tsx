@@ -12,6 +12,10 @@ import {
 } from '../components/Icons';
 import { formatDuration, formatRelativeTime } from '../lib/format';
 import { renderNoteHtml } from '../lib/note-html';
+import {
+  hydrateInlineImages,
+  normalizeInlineImagesForEditing,
+} from '@shared/note-content';
 
 interface DetailPageProps {
   id: string;
@@ -20,6 +24,7 @@ interface DetailPageProps {
 type ViewState = 'loading' | 'ready' | 'missing' | 'error';
 type HighlightColor = 'yellow' | 'green' | 'blue' | 'pink';
 type FolderOption = { id: string; label: string };
+type EditorMode = 'write' | 'preview';
 
 const MAX_INLINE_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_INLINE_IMAGE_BATCH_BYTES = 12 * 1024 * 1024;
@@ -56,7 +61,9 @@ export function DetailPage({ id }: DetailPageProps) {
   const [folders, setFolders] = useState<Folder[]>([]);
   const [streaming, setStreaming] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
+  const [editorMode, setEditorMode] = useState<EditorMode>('write');
   const [draft, setDraft] = useState('');
+  const [inlineImages, setInlineImages] = useState<Record<string, string>>({});
   const [transcriptDraft, setTranscriptDraft] = useState('');
   const [transcriptDirty, setTranscriptDirty] = useState(false);
   const [viewState, setViewState] = useState<ViewState>('loading');
@@ -71,6 +78,7 @@ export function DetailPage({ id }: DetailPageProps) {
   const dragDepth = useRef(0);
   const currentId = useRef(id);
   const draftRef = useRef('');
+  const inlineImagesRef = useRef<Record<string, string>>({});
   const editingRef = useRef(false);
   const noteRef = useRef<Note | null>(null);
   const transcriptDraftRef = useRef('');
@@ -79,6 +87,7 @@ export function DetailPage({ id }: DetailPageProps) {
   const imageInputRef = useRef<HTMLInputElement | null>(null);
 
   draftRef.current = draft;
+  inlineImagesRef.current = inlineImages;
   editingRef.current = editing;
   currentId.current = id;
   noteRef.current = note;
@@ -95,13 +104,14 @@ export function DetailPage({ id }: DetailPageProps) {
   }
 
   async function saveMarkdown(markdown: string) {
-    await api.notes.update(currentId.current, markdown);
+    const rawMarkdown = hydrateInlineImages(markdown, inlineImagesRef.current);
+    await api.notes.update(currentId.current, rawMarkdown);
     setNote((prev) => {
       if (!prev) return prev;
       return {
         ...prev,
-        markdown,
-        title: extractTitle(markdown),
+        markdown: rawMarkdown,
+        title: extractTitle(rawMarkdown),
       };
     });
   }
@@ -160,7 +170,10 @@ export function DetailPage({ id }: DetailPageProps) {
     if (!loaded) {
       setNote(null);
       setStreaming(null);
-      if (!preserveDraft) setDraft('');
+      if (!preserveDraft) {
+        setDraft('');
+        setInlineImages({});
+      }
       if (!preserveTranscript) {
         setTranscriptDraft('');
         setTranscriptDirty(false);
@@ -171,7 +184,11 @@ export function DetailPage({ id }: DetailPageProps) {
 
     setNote(loaded);
     setStreaming(null);
-    if (!preserveDraft) setDraft(loaded.markdown);
+    if (!preserveDraft) {
+      const editable = normalizeInlineImagesForEditing(loaded.markdown);
+      setDraft(editable.markdown);
+      setInlineImages(editable.inlineImages);
+    }
     if (!preserveTranscript) {
       setTranscriptDraft(loaded.transcript);
       setTranscriptDirty(false);
@@ -186,7 +203,9 @@ export function DetailPage({ id }: DetailPageProps) {
     setFolders([]);
     setStreaming(null);
     setEditing(false);
+    setEditorMode('write');
     setDraft('');
+    setInlineImages({});
     setTranscriptDraft('');
     setTranscriptDirty(false);
     setError(null);
@@ -250,9 +269,11 @@ export function DetailPage({ id }: DetailPageProps) {
   }, [id]);
 
   function onChange(next: string) {
-    setDraft(next);
+    const editable = normalizeInlineImagesForEditing(next, inlineImagesRef.current);
+    setDraft(editable.markdown);
+    setInlineImages(editable.inlineImages);
     setError(null);
-    pendingDraft.current = next;
+    pendingDraft.current = editable.markdown;
     clearPendingSave();
     saveTimer.current = setTimeout(() => {
       const latest = pendingDraft.current;
@@ -342,13 +363,19 @@ export function DetailPage({ id }: DetailPageProps) {
     }
 
     try {
-      const snippets = await Promise.all(
-        files.map(async (file, index) => {
-          const dataUrl = await readFileAsDataUrl(file);
-          const alt = file.name.replace(/\.[^.]+$/, '') || `${fallbackLabel} ${index + 1}`;
-          return `![${alt}](${dataUrl})`;
-        }),
-      );
+      const snippets: string[] = [];
+      let nextInlineImages = { ...inlineImagesRef.current };
+      for (const [index, file] of files.entries()) {
+        const dataUrl = await readFileAsDataUrl(file);
+        const alt = file.name.replace(/\.[^.]+$/, '') || `${fallbackLabel} ${index + 1}`;
+        const editable = normalizeInlineImagesForEditing(`![${alt}](${dataUrl})`, nextInlineImages);
+        nextInlineImages = {
+          ...nextInlineImages,
+          ...editable.inlineImages,
+        };
+        snippets.push(editable.markdown);
+      }
+      setInlineImages(nextInlineImages);
       insertSnippet(`\n\n${snippets.join('\n\n')}\n\n`);
     } catch (err) {
       setError(getErrorMessage(err, 'Failed to read image'));
@@ -412,6 +439,8 @@ export function DetailPage({ id }: DetailPageProps) {
     if (editing) {
       const saved = await flushPendingSave({ reportErrors: true });
       if (!saved) return;
+    } else {
+      setEditorMode('write');
     }
     setEditing((v) => !v);
   }
@@ -555,7 +584,12 @@ export function DetailPage({ id }: DetailPageProps) {
 
   const displayTitle = note?.title || 'Untitled';
   const isUntitled = !note?.title;
-  const renderedHtml = renderNoteHtml(showEditor ? draft : showStream ? streaming ?? '' : note?.markdown ?? '');
+  const activeMarkdown = showEditor
+    ? hydrateInlineImages(draft, inlineImages)
+    : showStream
+      ? streaming ?? ''
+      : note?.markdown ?? '';
+  const renderedHtml = renderNoteHtml(activeMarkdown);
   const currentFolderLabel = note?.folderName ?? 'Ungrouped';
 
   return (
@@ -687,69 +721,116 @@ export function DetailPage({ id }: DetailPageProps) {
       )}
 
       {showEditor ? (
-        <div className="editor-split">
-          <section
-            className={`editor-pane ${draggingImages ? 'dragging' : ''}`}
-            onDragEnter={onDragEnter}
-            onDragOver={onDragOver}
-            onDragLeave={onDragLeave}
-            onDrop={(event) => void onDropImages(event)}
-          >
+        <section className="editor-shell">
+          <div className="editor-header">
             <div className="editor-toolbar">
-              <button className="solid" onClick={() => imageInputRef.current?.click()}>
+              <button
+                className="solid"
+                onClick={() => imageInputRef.current?.click()}
+                disabled={editorMode !== 'write'}
+              >
                 <ImageIcon />
                 Inline image
               </button>
-              <button className="highlight-button yellow" onClick={() => onHighlight('yellow')}>
+              <button
+                className="highlight-button yellow"
+                onClick={() => onHighlight('yellow')}
+                disabled={editorMode !== 'write'}
+              >
                 Yellow
               </button>
-              <button className="highlight-button green" onClick={() => onHighlight('green')}>
+              <button
+                className="highlight-button green"
+                onClick={() => onHighlight('green')}
+                disabled={editorMode !== 'write'}
+              >
                 Green
               </button>
-              <button className="highlight-button blue" onClick={() => onHighlight('blue')}>
+              <button
+                className="highlight-button blue"
+                onClick={() => onHighlight('blue')}
+                disabled={editorMode !== 'write'}
+              >
                 Blue
               </button>
-              <button className="highlight-button pink" onClick={() => onHighlight('pink')}>
+              <button
+                className="highlight-button pink"
+                onClick={() => onHighlight('pink')}
+                disabled={editorMode !== 'write'}
+              >
                 Pink
               </button>
             </div>
-            <p className="editor-note">
-              Paste or drag images straight into the editor. The preview stays live while you write.
-            </p>
-            <textarea
-              ref={editorRef}
-              className="editor"
-              value={draft}
-              onChange={(e) => onChange(e.target.value)}
-              onPaste={(event) => void onPasteImage(event)}
-              spellCheck
-              autoFocus
-            />
-            <input
-              ref={imageInputRef}
+
+            <div className="editor-mode-toggle" role="tablist" aria-label="Editor mode">
+              <button
+                className={`editor-mode-tab ${editorMode === 'write' ? 'active' : ''}`}
+                onClick={() => setEditorMode('write')}
+                aria-selected={editorMode === 'write'}
+              >
+                Write
+              </button>
+              <button
+                className={`editor-mode-tab ${editorMode === 'preview' ? 'active' : ''}`}
+                onClick={() => {
+                  setDraggingImages(false);
+                  setEditorMode('preview');
+                }}
+                aria-selected={editorMode === 'preview'}
+              >
+                Preview
+              </button>
+            </div>
+          </div>
+
+          <p className="editor-note">
+            {editorMode === 'write'
+              ? 'Paste or drag images straight into the editor. Inline images stay compact while you write.'
+              : 'Preview the full note with inline images and highlights before you leave edit mode.'}
+          </p>
+          <input
+            ref={imageInputRef}
             className="visually-hidden"
             type="file"
             accept=".png,.jpg,.jpeg,.gif,.webp,.avif,.bmp"
             multiple
             onChange={(e) => void onPickImage(e)}
           />
-            {draggingImages && (
-              <div className="drop-overlay">
-                <span>Drop images to embed them inline</span>
-              </div>
-            )}
-          </section>
 
-          <section className="preview-pane">
-            <div className="preview-label">Preview</div>
-            <article
-              className="prose rendered-note"
-              dangerouslySetInnerHTML={{
-                __html: renderedHtml || '<p class="empty-note">This note is empty.</p>',
-              }}
-            />
-          </section>
-        </div>
+          {editorMode === 'write' ? (
+            <div
+              className={`editor-pane ${draggingImages ? 'dragging' : ''}`}
+              onDragEnter={onDragEnter}
+              onDragOver={onDragOver}
+              onDragLeave={onDragLeave}
+              onDrop={(event) => void onDropImages(event)}
+            >
+              <textarea
+                ref={editorRef}
+                className="editor"
+                value={draft}
+                onChange={(e) => onChange(e.target.value)}
+                onPaste={(event) => void onPasteImage(event)}
+                spellCheck
+                autoFocus
+              />
+              {draggingImages && (
+                <div className="drop-overlay">
+                  <span>Drop images to embed them inline</span>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="preview-pane">
+              <article
+                className="prose rendered-note editor-preview"
+                dangerouslySetInnerHTML={{
+                  __html: renderedHtml || '<p class="empty-note">This note is empty.</p>',
+                }}
+              />
+            </div>
+          )}
+        </section>
       ) : (
         <article
           className={`prose rendered-note ${showStream ? 'streaming-note' : ''}`}
