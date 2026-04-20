@@ -1,6 +1,6 @@
 {
   "name": "vinu",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Voice-driven notetaking with local Whisper + cloud LLM",
   "author": {
