@@ -1,0 +1,35 @@
+# Dependabot config. https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+version: 2
+updates:
+  # npm dependencies: weekly updates, grouped where safe to reduce PR noise.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      types:
+        patterns:
+          - '@types/*'
+      linting:
+        patterns:
+          - 'eslint*'
+          - 'prettier*'
+      fonts:
+        patterns:
+          - '@fontsource*'
+    ignore:
+      # Pin electron-builder's peer constraints: see memory / README.
+      - dependency-name: 'vite'
+        update-types: ['version-update:semver-major']
+      - dependency-name: '@vitejs/plugin-react'
+        update-types: ['version-update:semver-major']
+
+  # GitHub Actions: keep workflow action versions current.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3

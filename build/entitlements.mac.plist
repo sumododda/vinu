@@ -2,8 +2,20 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
   <dict>
+    <!-- Required for V8 JIT under hardened runtime. -->
     <key>com.apple.security.cs.allow-jit</key><true/>
-    <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+    <!-- Microphone access for voice-note recording. -->
     <key>com.apple.security.device.audio-input</key><true/>
+    <!--
+      Intentionally omitted:
+      - com.apple.security.cs.allow-unsigned-executable-memory:
+        Electron 41 + V8 run fine under hardened runtime with allow-jit alone;
+        no native module in this app maps W+X pages. Add back only if a
+        native dep (e.g. node-pty, a JIT'd WASM runtime) fails at launch.
+      - com.apple.security.cs.disable-library-validation:
+        Not needed; we do not load third-party unsigned dylibs.
+      - com.apple.security.cs.allow-dyld-environment-variables:
+        Not needed; no child process requires DYLD_* overrides.
+    -->
   </dict>
 </plist>

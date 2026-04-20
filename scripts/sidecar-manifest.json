@@ -1,0 +1,47 @@
+{
+  "comment": "SHA-256-pinned sidecar archives. Do not bump versions without recomputing hashes. Use `curl -sL <url> | shasum -a 256` to verify.",
+  "ffmpeg": {
+    "darwin-arm64": {
+      "version": "6.1.1",
+      "url": "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-arm64",
+      "sha256": "a90e3db6a3fd35f6074b013f948b1aa45b31c6375489d39e572bea3f18336584",
+      "archiveType": "binary",
+      "binaryName": "ffmpeg"
+    },
+    "darwin-x64": {
+      "version": "6.1.1",
+      "url": "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-x64",
+      "sha256": "ebdddc936f61e14049a2d4b549a412b8a40deeff6540e58a9f2a2da9e6b18894",
+      "archiveType": "binary",
+      "binaryName": "ffmpeg"
+    },
+    "win32-x64": {
+      "version": "8.1",
+      "url": "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1-essentials_build.zip",
+      "sha256": "8748283d821613d930b0e7be685aaa9df4ca6f0ad4d0c42fd02622b3623463c6",
+      "archiveType": "zip",
+      "binaryName": "ffmpeg.exe"
+    },
+    "linux-x64": {
+      "version": "7.0.2",
+      "url": "https://johnvansickle.com/ffmpeg/releases/ffmpeg-7.0.2-amd64-static.tar.xz",
+      "sha256": "abda8d77ce8309141f83ab8edf0596834087c52467f6badf376a6a2a4c87cf67",
+      "archiveType": "tarxz",
+      "binaryName": "ffmpeg"
+    }
+  },
+  "whisper": {
+    "win32-x64": {
+      "version": "v1.8.4",
+      "url": "https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-bin-x64.zip",
+      "sha256": "74f973345cb52ef5ba3ec9e7e7af8e48cc8c71722d1528603b80588a11f82e3e",
+      "archiveType": "zip",
+      "binaryName": "main.exe"
+    }
+  },
+  "whisperBuild": {
+    "version": "v1.8.4",
+    "repo": "https://github.com/ggml-org/whisper.cpp.git",
+    "platforms": ["darwin-arm64", "darwin-x64", "linux-x64"]
+  }
+}

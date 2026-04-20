@@ -1,0 +1,28 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- Rounded-square container with subtle top-to-bottom darkening -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#C5532F"/>
+      <stop offset="100%" stop-color="#9E3C23"/>
+    </linearGradient>
+    <mask id="bubble-knockout">
+      <rect x="576" y="192" width="320" height="208" rx="64" fill="white"/>
+      <circle cx="656" cy="296" r="20" fill="black"/>
+      <circle cx="736" cy="296" r="20" fill="black"/>
+      <circle cx="816" cy="296" r="20" fill="black"/>
+    </mask>
+  </defs>
+
+  <!-- macOS-style rounded square ("superellipse" approximated with 230px corners) -->
+  <rect width="1024" height="1024" rx="230" fill="url(#bg)"/>
+
+  <!-- V strokes -->
+  <path d="M 256 368 L 512 880" stroke="white" stroke-width="80" stroke-linecap="round"/>
+  <path d="M 704 336 L 512 880" stroke="white" stroke-width="80" stroke-linecap="round"/>
+
+  <!-- Microphone capsule (left endpoint) -->
+  <rect x="176" y="112" width="160" height="272" rx="80" fill="white"/>
+
+  <!-- Speech bubble with knocked-out dots (right endpoint) -->
+  <rect x="576" y="192" width="320" height="208" rx="64" fill="white" mask="url(#bubble-knockout)"/>
+</svg>

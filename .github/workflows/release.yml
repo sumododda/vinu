@@ -3,25 +3,37 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      # Proper semver: v1.2.3, v1.2.3-beta.1, v1.2.3-rc.4 etc.
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
 
+# Write access is needed so electron-builder (via GITHUB_TOKEN) can
+# create/update the GitHub Release that hosts the installer artifacts.
+permissions:
+  contents: write
+
 jobs:
   release:
     runs-on: ${{ matrix.os }}
+    # Generous budget — sidecar compile on linux + notarization can take a while.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: macos-latest
             platform: mac
+            package_args: --mac --arm64 --x64
           - os: windows-latest
             platform: win
+            package_args: --win
           - os: ubuntu-latest
             platform: linux
+            package_args: --linux
 
     steps:
       - uses: actions/checkout@v6
@@ -31,57 +43,46 @@ jobs:
           node-version: 22
           cache: npm
 
+      # Ubuntu runner lacks cmake by default; whisper.cpp is built from source
+      # there. macOS runners ship with cmake (via Xcode CLT); Windows uses the
+      # pre-built whisper binary from the sidecar manifest (no cmake needed).
+      - name: Install cmake + build deps (linux)
+        if: matrix.platform == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+
       - name: Install dependencies
         run: npm ci
 
       - name: Fetch sidecar binaries
         run: npm run fetch:sidecars
-        env:
-          CC: clang
-          CXX: clang++
 
-      - name: Build app
+      - name: Generate app icon
+        run: npm run gen:icon
+
+      - name: Build renderer + main
         run: npm run build
 
-      - name: Package (mac)
-        if: matrix.platform == 'mac'
-        run: npm run package:mac
+      - name: Package + publish
+        # `--publish always` makes electron-builder upload to the GitHub Release
+        # configured in electron-builder.cjs `publish.provider: github`.
+        # Each matrix runner uploads its own artifacts; electron-builder
+        # creates the release on first upload and appends on subsequent runs.
+        run: npx electron-builder ${{ matrix.package_args }} --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Package (win)
-        if: matrix.platform == 'win'
-        run: npm run package:win
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # ─── macOS signing + notarization ─────────────────────────────────
+          # When unset, electron-builder.cjs falls back to ad-hoc (unsigned)
+          # so the job still produces a usable DMG. Set these secrets in the
+          # repo settings to ship a proper Developer-ID signed + notarized
+          # build (see README "Release" section).
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          CSC_NAME: ${{ secrets.CSC_NAME }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
-      - name: Package (linux)
-        if: matrix.platform == 'linux'
-        run: npm run package:linux
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: vinu-${{ matrix.platform }}
-          path: release/**/*
-          if-no-files-found: error
-
-  publish:
-    needs: release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          path: artifacts
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          files: artifacts/**/*
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # ─── Windows Authenticode signing ─────────────────────────────────
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
