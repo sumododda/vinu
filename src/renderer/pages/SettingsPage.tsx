@@ -8,24 +8,100 @@ const PROVIDER_DEFAULTS: Record<Settings['provider'], { baseUrl: string; modelHi
   custom: { baseUrl: '', modelHint: 'e.g. llama3.2 (Ollama) or gpt-4o-mini' },
 };
 
+function getErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
+function nextBaseUrl(
+  currentBaseUrl: string,
+  currentProvider: Settings['provider'],
+  nextProvider: Settings['provider'],
+) {
+  const currentDefault = PROVIDER_DEFAULTS[currentProvider].baseUrl;
+  const nextDefault = PROVIDER_DEFAULTS[nextProvider].baseUrl;
+
+  if (!currentBaseUrl.trim() || currentBaseUrl === currentDefault) {
+    return nextDefault;
+  }
+
+  return currentBaseUrl;
+}
+
 export function SettingsPage() {
   const [s, setS] = useState<Settings | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
+  const [loadVersion, setLoadVersion] = useState(0);
 
   useEffect(() => {
-    api.settings.get().then(setS);
-  }, []);
+    let cancelled = false;
 
-  if (!s) return <p>Loading…</p>;
+    setIsLoading(true);
+    setLoadError(null);
+
+    api.settings
+      .get()
+      .then((settings) => {
+        if (cancelled) return;
+        setS(settings);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setLoadError(getErrorMessage(error, 'Failed to load settings'));
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setIsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [loadVersion]);
+
+  if (isLoading) return <p>Loading…</p>;
+
+  if (loadError) {
+    return (
+      <div style={{ maxWidth: 640 }}>
+        <div className="toolbar">
+          <h2 style={{ margin: 0 }}>Settings</h2>
+          <div className="spacer" />
+          <a href="#/">Back</a>
+        </div>
+
+        <p role="alert" style={{ color: 'var(--accent)' }}>
+          {loadError}
+        </p>
+        <button onClick={() => setLoadVersion((v) => v + 1)}>Retry</button>
+      </div>
+    );
+  }
+
+  if (!s) return <p>Unable to load settings.</p>;
 
   function update<K extends keyof Settings>(k: K, v: Settings[K]) {
+    setSavedAt(null);
+    setSaveError(null);
     setS((prev) => (prev ? { ...prev, [k]: v } : prev));
   }
 
   async function save() {
     if (!s) return;
-    await api.settings.set(s);
-    setSavedAt(Date.now());
+    setIsSaving(true);
+    setSaveError(null);
+
+    try {
+      await api.settings.set(s);
+      setSavedAt(Date.now());
+    } catch (error) {
+      setSaveError(getErrorMessage(error, 'Failed to save settings'));
+    } finally {
+      setIsSaving(false);
+    }
   }
 
   return (
@@ -46,8 +122,9 @@ export function SettingsPage() {
                 name="provider"
                 checked={s.provider === p}
                 onChange={() => {
+                  const updatedBaseUrl = nextBaseUrl(s.baseUrl, s.provider, p);
                   update('provider', p);
-                  update('baseUrl', PROVIDER_DEFAULTS[p].baseUrl);
+                  if (updatedBaseUrl !== s.baseUrl) update('baseUrl', updatedBaseUrl);
                 }}
               />{' '}
               {p}
@@ -118,9 +195,14 @@ export function SettingsPage() {
       </fieldset>
 
       <div style={{ marginTop: 24 }}>
-        <button className="primary" onClick={save}>
-          Save
+        <button className="primary" onClick={save} disabled={isSaving}>
+          {isSaving ? 'Saving…' : 'Save'}
         </button>
+        {saveError && (
+          <small role="alert" style={{ marginLeft: 8, color: 'var(--accent)' }}>
+            {saveError}
+          </small>
+        )}
         {savedAt && (
           <small style={{ marginLeft: 8, color: 'var(--muted)' }}>Saved.</small>
         )}
