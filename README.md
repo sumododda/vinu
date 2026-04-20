@@ -15,13 +15,38 @@ summary call leaves your machine, and only to the LLM provider you choose.
 
 ## Install
 
-> macOS 15+ (Sequoia) / macOS 26+ supported. Windows + Linux builds ship from the same CI pipeline; binaries are produced but less battle-tested.
+Downloads are on the [Releases page](https://github.com/sumododda/vinu/releases/latest).
 
-1. Grab the latest **`vinu-x.y.z-arm64.dmg`** (Apple Silicon) or **`vinu-x.y.z.dmg`** (Intel) from the [Releases page](https://github.com/sumododda/vinu/releases/latest).
-2. Mount the DMG, drag **vinu** into Applications.
-3. Launch. Unsigned dev builds will prompt "Apple cannot verify..." once — right-click → **Open** to bypass. Signed+notarized builds launch cleanly.
-4. Grant **Microphone** access on first record. vinu asks only for microphone.
-5. Open **Settings** (gear icon), paste your provider API key, and pick a model.
+> **Heads-up:** binaries are **unsigned**. vinu is a personal project and I'm not
+> paying the Apple Developer / Authenticode fees, so both macOS and Windows
+> will warn you once. The app is not malware; the warnings are what the OS
+> shows for *any* app it can't tie to a paid developer cert. One-time
+> workarounds below.
+
+### macOS
+
+1. Download **`vinu-0.1.0-arm64.dmg`** (Apple Silicon — most Macs made in 2020+) or **`vinu-0.1.0.dmg`** (Intel).
+2. Open the DMG, drag **vinu** into Applications.
+3. Try to launch → macOS Gatekeeper shows *"Apple could not verify 'vinu' is free of malware"* and only offers **Move to Trash** or **Done**. Pick **Done**.
+4. Open **System Settings → Privacy & Security**, scroll to the bottom. There'll be a yellow banner saying *"vinu was blocked to protect your Mac"*. Click **Open Anyway**. Confirm with your password / Touch ID. Vinu launches.
+5. (Optional, faster path) In Terminal: `xattr -cr /Applications/vinu.app` — strips the quarantine flag so it launches cleanly from Finder forever after.
+6. Grant **Microphone** access on first record.
+7. Open **Settings** (gear icon, top-right of the sidebar), paste your provider API key, pick a model.
+
+### Windows
+
+1. Download **`vinu-Setup-0.1.0.exe`**.
+2. SmartScreen will block it with *"Windows protected your PC"*. Click **More info** → **Run anyway**.
+3. Follow the installer. Grant microphone access on first record.
+
+### Linux
+
+Pick one:
+
+- **AppImage**: `chmod +x vinu-0.1.0.AppImage && ./vinu-0.1.0.AppImage`
+- **deb** (Debian/Ubuntu): `sudo dpkg -i vinu_0.1.0_amd64.deb`
+
+No Gatekeeper equivalent on Linux — it just runs.
 
 ### Hotkey
 
