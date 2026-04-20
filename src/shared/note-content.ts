@@ -4,7 +4,7 @@ export const INLINE_IMAGE_TOKEN_PREFIX = 'inline-image:';
 export type HighlightColor = (typeof HIGHLIGHT_COLORS)[number];
 
 const COLOR_PATTERN = HIGHLIGHT_COLORS.join('|');
-const SAFE_DATA_IMAGE_RE = /^data:image\/(?:png|jpeg|jpg|gif|webp|avif|bmp);/i;
+const SAFE_DATA_IMAGE_RE = /^data:image\/(?:png|jpeg|jpg|gif|webp|avif|bmp);base64,[A-Za-z0-9+/=]+$/i;
 
 const BLOCK_HIGHLIGHT_RE = new RegExp(
   `:::highlight (${COLOR_PATTERN})\\r?\\n([\\s\\S]+?)\\r?\\n:::`,

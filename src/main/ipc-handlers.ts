@@ -3,7 +3,7 @@ import { mkdir, unlink, writeFile } from 'node:fs/promises';
 import { join, relative, resolve, isAbsolute } from 'node:path';
 import { v4 as uuidv4 } from 'uuid';
 import { IpcChannels, type NotesEvent } from '@shared/ipc';
-import type { Settings } from '@shared/types';
+import type { RendererSettings, Settings } from '@shared/types';
 import { extractTitle } from '@shared/title';
 import type { NoteStore } from './db/store';
 import type { Pipeline } from './pipeline';
@@ -103,14 +103,51 @@ function assertAudioBuffer(channel: string, value: unknown): Buffer {
   return buf;
 }
 
-function assertSettings(channel: string, value: unknown): Settings {
+const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1', '0.0.0.0']);
+
+function assertBaseUrl(channel: string, raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new IpcValidationError(channel, 'baseUrl must be a valid URL');
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new IpcValidationError(channel, 'baseUrl must use http: or https:');
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  if (LOCAL_HOSTNAMES.has(hostname) || hostname.endsWith('.local')) {
+    throw new IpcValidationError(channel, 'baseUrl cannot target localhost or .local hosts');
+  }
+  if (/^169\.254\./.test(hostname) || /^10\./.test(hostname) || /^192\.168\./.test(hostname)) {
+    throw new IpcValidationError(channel, 'baseUrl cannot target private IP ranges');
+  }
+  if (/^172\.(1[6-9]|2[0-9]|3[01])\./.test(hostname)) {
+    throw new IpcValidationError(channel, 'baseUrl cannot target private IP ranges');
+  }
+  return trimmed;
+}
+
+function assertSettings(channel: string, value: unknown, existing: Settings): Settings {
   const s = assertObject(channel, value);
   const provider = s['provider'];
   if (provider !== 'anthropic' && provider !== 'openrouter' && provider !== 'custom') {
     throw new IpcValidationError(channel, 'provider must be anthropic | openrouter | custom');
   }
-  const apiKey = assertString(channel, s['apiKey'], 'apiKey', MAX_TEXT_BYTES);
-  const baseUrl = assertString(channel, s['baseUrl'], 'baseUrl', MAX_TEXT_BYTES);
+  // Renderer sends an empty `apiKey` when the user didn't type a new one —
+  // preserve what's already stored instead of wiping it.
+  const apiKeyRaw = s['apiKey'];
+  const apiKey =
+    typeof apiKeyRaw === 'string' && apiKeyRaw.length > 0
+      ? assertString(channel, apiKeyRaw, 'apiKey', MAX_TEXT_BYTES)
+      : existing.apiKey;
+  const rawBaseUrl = assertString(channel, s['baseUrl'], 'baseUrl', MAX_TEXT_BYTES);
+  const baseUrl = assertBaseUrl(channel, rawBaseUrl);
+  if (provider === 'custom' && !baseUrl) {
+    throw new IpcValidationError(channel, 'custom provider requires a non-empty baseUrl');
+  }
   const model = assertString(channel, s['model'], 'model', MAX_TEXT_BYTES);
   if (typeof s['hotkeyEnabled'] !== 'boolean') {
     throw new IpcValidationError(channel, 'hotkeyEnabled must be boolean');
@@ -311,9 +348,44 @@ export function registerIpcHandlers(deps: IpcHandlerDeps): {
     return deps.store.createFolder({ id: uuidv4(), name, parentId });
   });
 
-  ipcMain.handle(IpcChannels.SettingsGet, () => deps.settings.read());
+  ipcMain.handle(IpcChannels.FoldersRename, (_e, input: unknown) => {
+    const channel = IpcChannels.FoldersRename;
+    const o = assertObject(channel, input);
+    const id = assertUuid(channel, o['id']);
+    const name = assertString(channel, o['name'], 'name', MAX_TEXT_BYTES).trim();
+    if (!name) throw new IpcValidationError(channel, 'name must not be empty');
+    return deps.store.renameFolder(id, name);
+  });
+
+  ipcMain.handle(IpcChannels.FoldersSetParent, (_e, input: unknown) => {
+    const channel = IpcChannels.FoldersSetParent;
+    const o = assertObject(channel, input);
+    const id = assertUuid(channel, o['id']);
+    const parentValue = o['parentId'];
+    const parentId = parentValue == null ? null : assertUuid(channel, parentValue, 'parentId');
+    return deps.store.setFolderParent(id, parentId);
+  });
+
+  ipcMain.handle(IpcChannels.FoldersDelete, (_e, input: unknown) => {
+    const channel = IpcChannels.FoldersDelete;
+    const o = assertObject(channel, input);
+    const id = assertUuid(channel, o['id']);
+    const destValue = o['notesDestination'];
+    if (destValue !== 'parent' && destValue !== 'ungrouped') {
+      throw new IpcValidationError(channel, 'notesDestination must be "parent" or "ungrouped"');
+    }
+    deps.store.deleteFolder(id, destValue);
+    broadcastNotesEvent({ type: 'note:updated', payload: { id: '' } });
+  });
+
+  ipcMain.handle(IpcChannels.SettingsGet, (): RendererSettings => {
+    const stored = deps.settings.read();
+    const { apiKey, ...rest } = stored;
+    return { ...rest, hasApiKey: apiKey.length > 0 };
+  });
   ipcMain.handle(IpcChannels.SettingsSet, (_e, s: unknown) => {
-    const validated = assertSettings(IpcChannels.SettingsSet, s);
+    const existing = deps.settings.read();
+    const validated = assertSettings(IpcChannels.SettingsSet, s, existing);
     deps.settings.write(validated);
   });
 

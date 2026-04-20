@@ -176,9 +176,11 @@ export class SettingsStore {
     for (const listener of this.listeners) {
       try {
         listener(s);
-      } catch {
+      } catch (err) {
         // Swallow observer errors — a broken subscriber shouldn't corrupt
-        // the write path or starve sibling listeners.
+        // the write path or starve sibling listeners — but log so silent
+        // failures surface in dev tools instead of rotting.
+        console.error('[settings] listener threw after write:', err);
       }
     }
   }

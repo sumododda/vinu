@@ -1,13 +1,25 @@
-import { type ChangeEvent, type DragEvent, type ClipboardEvent, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  type ChangeEvent,
+  type DragEvent,
+  type ClipboardEvent,
+  type KeyboardEvent,
+  type MouseEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { api } from '../lib/api';
 import type { Folder, Note } from '../lib/api';
 import { extractTitle } from '@shared/title';
 import {
   BackIcon,
   CheckIcon,
+  ChevronRightIcon,
   EditIcon,
   ImageIcon,
   RetryIcon,
+  ShareIcon,
   TrashIcon,
 } from '../components/Icons';
 import { formatDuration, formatRelativeTime } from '../lib/format';
@@ -25,6 +37,21 @@ type ViewState = 'loading' | 'ready' | 'missing' | 'error';
 type HighlightColor = 'yellow' | 'green' | 'blue' | 'pink';
 type FolderOption = { id: string; label: string };
 type EditorMode = 'write' | 'preview';
+interface HistoryEntry {
+  markdown: string;
+  inlineImages: Record<string, string>;
+  selectionStart: number;
+  selectionEnd: number;
+}
+
+const HIGHLIGHT_KEYS: Record<string, HighlightColor> = {
+  '1': 'yellow',
+  '2': 'green',
+  '3': 'blue',
+  '4': 'pink',
+};
+const HISTORY_LIMIT = 100;
+const HISTORY_IDLE_MS = 600;
 
 const MAX_INLINE_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_INLINE_IMAGE_BATCH_BYTES = 12 * 1024 * 1024;
@@ -68,10 +95,9 @@ export function DetailPage({ id }: DetailPageProps) {
   const [transcriptDirty, setTranscriptDirty] = useState(false);
   const [viewState, setViewState] = useState<ViewState>('loading');
   const [error, setError] = useState<string | null>(null);
-  const [showFolderCreator, setShowFolderCreator] = useState(false);
-  const [folderDraft, setFolderDraft] = useState('');
-  const [folderParentDraft, setFolderParentDraft] = useState('');
+  const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [draggingImages, setDraggingImages] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingDraft = useRef<string | null>(null);
@@ -85,6 +111,13 @@ export function DetailPage({ id }: DetailPageProps) {
   const transcriptDirtyRef = useRef(false);
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const exportMenuRef = useRef<HTMLDivElement | null>(null);
+  const historyRef = useRef<{ past: HistoryEntry[]; future: HistoryEntry[] }>({
+    past: [],
+    future: [],
+  });
+  const historyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const suppressHistoryRef = useRef(false);
 
   draftRef.current = draft;
   inlineImagesRef.current = inlineImages;
@@ -209,10 +242,10 @@ export function DetailPage({ id }: DetailPageProps) {
     setTranscriptDraft('');
     setTranscriptDirty(false);
     setError(null);
-    setFolderDraft('');
-    setFolderParentDraft('');
-    setShowFolderCreator(false);
+    setTranscriptOpen(false);
     setDraggingImages(false);
+    historyRef.current = { past: [], future: [] };
+    flushHistoryTimer();
     dragDepth.current = 0;
     setViewState('loading');
     clearPendingSave();
@@ -270,6 +303,7 @@ export function DetailPage({ id }: DetailPageProps) {
 
   function onChange(next: string) {
     const editable = normalizeInlineImagesForEditing(next, inlineImagesRef.current);
+    if (!suppressHistoryRef.current) recordHistorySnapshot();
     setDraft(editable.markdown);
     setInlineImages(editable.inlineImages);
     setError(null);
@@ -286,6 +320,139 @@ export function DetailPage({ id }: DetailPageProps) {
     }, 500);
   }
 
+  function captureHistoryEntry(): HistoryEntry {
+    const textarea = editorRef.current;
+    return {
+      markdown: draftRef.current,
+      inlineImages: { ...inlineImagesRef.current },
+      selectionStart: textarea?.selectionStart ?? draftRef.current.length,
+      selectionEnd: textarea?.selectionEnd ?? draftRef.current.length,
+    };
+  }
+
+  function pushHistoryEntry(entry: HistoryEntry) {
+    const past = historyRef.current.past;
+    const top = past[past.length - 1];
+    if (top && top.markdown === entry.markdown) return;
+    past.push(entry);
+    if (past.length > HISTORY_LIMIT) past.shift();
+    historyRef.current.future = [];
+  }
+
+  function recordHistorySnapshot() {
+    const entry = captureHistoryEntry();
+    if (historyTimer.current) clearTimeout(historyTimer.current);
+    historyTimer.current = setTimeout(() => {
+      pushHistoryEntry(entry);
+      historyTimer.current = null;
+    }, HISTORY_IDLE_MS);
+  }
+
+  function flushHistoryTimer() {
+    if (historyTimer.current) {
+      clearTimeout(historyTimer.current);
+      historyTimer.current = null;
+    }
+  }
+
+  function applyHistoryEntry(entry: HistoryEntry) {
+    suppressHistoryRef.current = true;
+    try {
+      setDraft(entry.markdown);
+      setInlineImages(entry.inlineImages);
+      pendingDraft.current = entry.markdown;
+      clearPendingSave();
+      saveTimer.current = setTimeout(() => {
+        const latest = pendingDraft.current;
+        if (latest == null) return;
+        pendingDraft.current = null;
+        void saveMarkdown(latest).catch((err) => {
+          pendingDraft.current = latest;
+          setError(getErrorMessage(err, 'Failed to save note'));
+        });
+      }, 500);
+    } finally {
+      suppressHistoryRef.current = false;
+    }
+    requestAnimationFrame(() => {
+      const textarea = editorRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      textarea.setSelectionRange(entry.selectionStart, entry.selectionEnd);
+    });
+  }
+
+  function undo(): boolean {
+    flushHistoryTimer();
+    const past = historyRef.current.past;
+    if (past.length === 0) return false;
+    const current = captureHistoryEntry();
+    const previous = past.pop()!;
+    historyRef.current.future.push(current);
+    applyHistoryEntry(previous);
+    return true;
+  }
+
+  function redo(): boolean {
+    flushHistoryTimer();
+    const future = historyRef.current.future;
+    if (future.length === 0) return false;
+    const current = captureHistoryEntry();
+    const next = future.pop()!;
+    historyRef.current.past.push(current);
+    applyHistoryEntry(next);
+    return true;
+  }
+
+  function insertLink() {
+    const textarea = editorRef.current;
+    const current = draftRef.current;
+    const start = textarea?.selectionStart ?? current.length;
+    const end = textarea?.selectionEnd ?? current.length;
+    const selected = current.slice(start, end) || 'link text';
+    const wrapped = `[${selected}](url)`;
+    const next = `${current.slice(0, start)}${wrapped}${current.slice(end)}`;
+    const urlStart = start + 1 + selected.length + 2;
+    applyDraftUpdate(next, urlStart, urlStart + 3);
+  }
+
+  function onEditorKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    const mod = event.metaKey || event.ctrlKey;
+    if (!mod) return;
+
+    if (event.key === 'z' || event.key === 'Z') {
+      event.preventDefault();
+      if (event.shiftKey) redo();
+      else undo();
+      return;
+    }
+    if (event.key === 'y' || event.key === 'Y') {
+      event.preventDefault();
+      redo();
+      return;
+    }
+    if (event.key === 'b' || event.key === 'B') {
+      event.preventDefault();
+      wrapSelection('**', '**', 'bold text');
+      return;
+    }
+    if (event.key === 'i' || event.key === 'I') {
+      event.preventDefault();
+      wrapSelection('*', '*', 'italic text');
+      return;
+    }
+    if (event.key === 'k' || event.key === 'K') {
+      event.preventDefault();
+      insertLink();
+      return;
+    }
+    const color = HIGHLIGHT_KEYS[event.key];
+    if (color) {
+      event.preventDefault();
+      onHighlight(color);
+    }
+  }
+
   function onTranscriptChange(next: string) {
     setTranscriptDraft(next);
     setTranscriptDirty(true);
@@ -293,6 +460,10 @@ export function DetailPage({ id }: DetailPageProps) {
   }
 
   function applyDraftUpdate(next: string, selectionStart?: number, selectionEnd?: number) {
+    if (!suppressHistoryRef.current) {
+      flushHistoryTimer();
+      pushHistoryEntry(captureHistoryEntry());
+    }
     onChange(next);
     if (selectionStart == null || selectionEnd == null) return;
 
@@ -326,15 +497,71 @@ export function DetailPage({ id }: DetailPageProps) {
     applyDraftUpdate(next, caret, caret);
   }
 
+  function preserveSelection(event: MouseEvent<HTMLButtonElement>) {
+    if (document.activeElement === editorRef.current) {
+      event.preventDefault();
+    }
+  }
+
   function onHighlight(color: HighlightColor) {
-    const selection = editorRef.current
-      ? draftRef.current.slice(editorRef.current.selectionStart, editorRef.current.selectionEnd)
-      : '';
+    const textarea = editorRef.current;
+    const current = draftRef.current;
+    const start = textarea?.selectionStart ?? current.length;
+    const end = textarea?.selectionEnd ?? current.length;
+    const selection = current.slice(start, end);
+
+    if (start !== end && unwrapHighlight(color, current, start, end)) return;
     if (selection.includes('\n')) {
       wrapSelection(`\n\n:::highlight ${color}\n`, '\n:::\n\n', 'Highlighted lines');
       return;
     }
     wrapSelection(`==${color}::`, '==', 'highlighted text');
+  }
+
+  function unwrapHighlight(
+    color: HighlightColor,
+    current: string,
+    start: number,
+    end: number,
+  ): boolean {
+    const selection = current.slice(start, end);
+
+    const inlineExact = new RegExp(`^==${color}::([\\s\\S]+?)==$`);
+    const inlineMatch = selection.match(inlineExact);
+    if (inlineMatch) {
+      const inner = inlineMatch[1];
+      const next = `${current.slice(0, start)}${inner}${current.slice(end)}`;
+      applyDraftUpdate(next, start, start + inner.length);
+      return true;
+    }
+
+    const inlineOpen = `==${color}::`;
+    const inlineClose = '==';
+    if (
+      current.slice(start - inlineOpen.length, start) === inlineOpen &&
+      current.slice(end, end + inlineClose.length) === inlineClose
+    ) {
+      const next =
+        current.slice(0, start - inlineOpen.length) +
+        selection +
+        current.slice(end + inlineClose.length);
+      const newStart = start - inlineOpen.length;
+      applyDraftUpdate(next, newStart, newStart + selection.length);
+      return true;
+    }
+
+    const blockExact = new RegExp(
+      `^\\n*:::highlight ${color}\\r?\\n([\\s\\S]+?)\\r?\\n:::\\n*$`,
+    );
+    const blockMatch = selection.match(blockExact);
+    if (blockMatch) {
+      const inner = blockMatch[1];
+      const next = `${current.slice(0, start)}${inner}${current.slice(end)}`;
+      applyDraftUpdate(next, start, start + inner.length);
+      return true;
+    }
+
+    return false;
   }
 
   async function insertImages(files: File[], fallbackLabel: string) {
@@ -528,28 +755,57 @@ export function DetailPage({ id }: DetailPageProps) {
     }
   }
 
-  async function onCreateFolder() {
-    const name = folderDraft.trim();
-    if (!name) return;
+  useEffect(() => {
+    if (!exportOpen) return;
+    const handler = (event: globalThis.MouseEvent) => {
+      if (!exportMenuRef.current) return;
+      if (exportMenuRef.current.contains(event.target as Node)) return;
+      setExportOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [exportOpen]);
 
-    setError(null);
+  function resolveExportMarkdown(): string {
+    const source = noteRef.current?.markdown ?? '';
+    return source;
+  }
+
+  function exportFilename(): string {
+    const raw = (noteRef.current?.title || 'note').trim();
+    const safe = raw.replace(/[^a-zA-Z0-9-_. ]+/g, '').replace(/\s+/g, '-') || 'note';
+    return `${safe}.md`;
+  }
+
+  async function onCopyMarkdown() {
+    setExportOpen(false);
     try {
-      const folder = await api.folders.create(name, folderParentDraft || null);
-      setFolders((prev) => [...prev.filter((item) => item.id !== folder.id), folder]);
-      await api.notes.setFolder(id, folder.id);
-      setNote((prev) => (prev ? { ...prev, folderId: folder.id, folderName: folder.name } : prev));
-      setFolderDraft('');
-      setFolderParentDraft(folder.id);
-      setShowFolderCreator(false);
+      await navigator.clipboard.writeText(resolveExportMarkdown());
     } catch (err) {
-      setError(getErrorMessage(err, 'Failed to create folder'));
+      setError(getErrorMessage(err, 'Failed to copy note'));
     }
   }
 
-  function openFolderCreator() {
-    setFolderDraft('');
-    setFolderParentDraft(note?.folderId ?? '');
-    setShowFolderCreator(true);
+  function onDownloadMarkdown() {
+    setExportOpen(false);
+    try {
+      const blob = new Blob([resolveExportMarkdown()], { type: 'text/markdown;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = exportFilename();
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(getErrorMessage(err, 'Failed to download note'));
+    }
+  }
+
+  function onPrintNote() {
+    setExportOpen(false);
+    window.print();
   }
 
   function navigateHome() {
@@ -617,6 +873,33 @@ export function DetailPage({ id }: DetailPageProps) {
             Retry
           </button>
         )}
+        {note?.status === 'ready' && (
+          <div className="export-menu" ref={exportMenuRef}>
+            <button
+              className="icon ghost"
+              onClick={() => setExportOpen((v) => !v)}
+              aria-label="Export note"
+              aria-haspopup="menu"
+              aria-expanded={exportOpen}
+              title="Export"
+            >
+              <ShareIcon />
+            </button>
+            {exportOpen && (
+              <div className="export-menu-popover" role="menu">
+                <button role="menuitem" onClick={() => void onCopyMarkdown()}>
+                  Copy markdown
+                </button>
+                <button role="menuitem" onClick={onDownloadMarkdown}>
+                  Download .md
+                </button>
+                <button role="menuitem" onClick={onPrintNote}>
+                  Print
+                </button>
+              </div>
+            )}
+          </div>
+        )}
         <button
           className="icon ghost"
           onClick={() => void onDelete()}
@@ -641,64 +924,18 @@ export function DetailPage({ id }: DetailPageProps) {
           <div className="note-controls card">
             <div className="field">
               <label htmlFor="folder-select">Folder</label>
-              <div className="folder-actions">
-                <select
-                  id="folder-select"
-                  value={note.folderId ?? ''}
-                  onChange={(e) => void onSelectFolder(e.target.value)}
-                >
-                  <option value="">Ungrouped</option>
-                  {folderOptions.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-                {!showFolderCreator ? (
-                  <button className="solid" onClick={openFolderCreator}>
-                    New folder
-                  </button>
-                ) : (
-                  <>
-                    <input
-                      type="text"
-                      value={folderDraft}
-                      onChange={(e) => setFolderDraft(e.target.value)}
-                      placeholder="Folder name"
-                      aria-label="New folder name"
-                    />
-                    <select
-                      value={folderParentDraft}
-                      onChange={(e) => setFolderParentDraft(e.target.value)}
-                      aria-label="Parent folder"
-                    >
-                      <option value="">Top level</option>
-                      {folderOptions.map((option) => (
-                        <option key={option.id} value={option.id}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                    <button
-                      className="primary"
-                      onClick={() => void onCreateFolder()}
-                      disabled={!folderDraft.trim()}
-                    >
-                      Create
-                    </button>
-                    <button
-                      className="ghost"
-                      onClick={() => {
-                        setShowFolderCreator(false);
-                        setFolderDraft('');
-                        setFolderParentDraft('');
-                      }}
-                    >
-                      Cancel
-                    </button>
-                  </>
-                )}
-              </div>
+              <select
+                id="folder-select"
+                value={note.folderId ?? ''}
+                onChange={(e) => void onSelectFolder(e.target.value)}
+              >
+                <option value="">Ungrouped</option>
+                {folderOptions.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
         </>
@@ -726,6 +963,7 @@ export function DetailPage({ id }: DetailPageProps) {
             <div className="editor-toolbar">
               <button
                 className="solid"
+                onMouseDown={preserveSelection}
                 onClick={() => imageInputRef.current?.click()}
                 disabled={editorMode !== 'write'}
               >
@@ -734,6 +972,7 @@ export function DetailPage({ id }: DetailPageProps) {
               </button>
               <button
                 className="highlight-button yellow"
+                onMouseDown={preserveSelection}
                 onClick={() => onHighlight('yellow')}
                 disabled={editorMode !== 'write'}
               >
@@ -741,6 +980,7 @@ export function DetailPage({ id }: DetailPageProps) {
               </button>
               <button
                 className="highlight-button green"
+                onMouseDown={preserveSelection}
                 onClick={() => onHighlight('green')}
                 disabled={editorMode !== 'write'}
               >
@@ -748,6 +988,7 @@ export function DetailPage({ id }: DetailPageProps) {
               </button>
               <button
                 className="highlight-button blue"
+                onMouseDown={preserveSelection}
                 onClick={() => onHighlight('blue')}
                 disabled={editorMode !== 'write'}
               >
@@ -755,6 +996,7 @@ export function DetailPage({ id }: DetailPageProps) {
               </button>
               <button
                 className="highlight-button pink"
+                onMouseDown={preserveSelection}
                 onClick={() => onHighlight('pink')}
                 disabled={editorMode !== 'write'}
               >
@@ -810,6 +1052,7 @@ export function DetailPage({ id }: DetailPageProps) {
                 className="editor"
                 value={draft}
                 onChange={(e) => onChange(e.target.value)}
+                onKeyDown={onEditorKeyDown}
                 onPaste={(event) => void onPasteImage(event)}
                 spellCheck
                 autoFocus
@@ -840,34 +1083,44 @@ export function DetailPage({ id }: DetailPageProps) {
         />
       )}
 
-      <section className="transcript-card card">
-        <div className="transcript-header-row">
-          <div>
-            <h3>Transcript</h3>
+      <section className={`transcript-card card ${transcriptOpen ? 'open' : ''}`}>
+        <button
+          type="button"
+          className="transcript-toggle"
+          aria-expanded={transcriptOpen}
+          aria-controls="transcript-body"
+          onClick={() => setTranscriptOpen((v) => !v)}
+        >
+          <ChevronRightIcon className={`transcript-caret ${transcriptOpen ? 'open' : ''}`} />
+          <span className="transcript-toggle-label">Transcript</span>
+          {transcriptDirty && <span className="transcript-dirty">Unsaved</span>}
+        </button>
+
+        {transcriptOpen && (
+          <div id="transcript-body" className="transcript-body">
             <p className="card-desc">
               Correct wording, add missing context, then regenerate the note from this edited transcript.
             </p>
+            <textarea
+              className="transcript-editor"
+              value={transcriptDraft}
+              onChange={(e) => onTranscriptChange(e.target.value)}
+              spellCheck
+            />
+            <div className="transcript-actions">
+              <button className="ghost" onClick={() => void onSaveTranscript()} disabled={!transcriptDirty}>
+                Save transcript
+              </button>
+              <button
+                className="primary"
+                onClick={() => void onRegenerate()}
+                disabled={!transcriptDraft.trim() || note?.status === 'transcribing' || note?.status === 'generating'}
+              >
+                {note?.markdown ? 'Regenerate note' : 'Generate note'}
+              </button>
+            </div>
           </div>
-          <div className="transcript-actions">
-            {transcriptDirty && <span className="transcript-dirty">Unsaved</span>}
-            <button className="ghost" onClick={() => void onSaveTranscript()} disabled={!transcriptDirty}>
-              Save transcript
-            </button>
-            <button
-              className="primary"
-              onClick={() => void onRegenerate()}
-              disabled={!transcriptDraft.trim() || note?.status === 'transcribing' || note?.status === 'generating'}
-            >
-              {note?.markdown ? 'Regenerate note' : 'Generate note'}
-            </button>
-          </div>
-        </div>
-        <textarea
-          className="transcript-editor"
-          value={transcriptDraft}
-          onChange={(e) => onTranscriptChange(e.target.value)}
-          spellCheck
-        />
+        )}
       </section>
 
       {note?.audioPath && (

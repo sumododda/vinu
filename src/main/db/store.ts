@@ -93,6 +93,12 @@ export class NoteStore {
   private readonly listFoldersStmt: Database.Statement;
   private readonly getFolderByNameStmt: Database.Statement;
   private readonly createFolderStmt: Database.Statement;
+  private readonly getFolderStmt: Database.Statement;
+  private readonly renameFolderStmt: Database.Statement;
+  private readonly setFolderParentStmt: Database.Statement;
+  private readonly deleteFolderStmt: Database.Statement;
+  private readonly moveNotesFromFolderStmt: Database.Statement;
+  private readonly moveChildFoldersStmt: Database.Statement;
 
   constructor(private readonly db: Database.Database) {
     this.createStmt = db.prepare(
@@ -158,6 +164,24 @@ export class NoteStore {
     );
     this.createFolderStmt = db.prepare(
       'INSERT INTO folders (id, created_at, updated_at, name, parent_id) VALUES (?, ?, ?, ?, ?)',
+    );
+    this.getFolderStmt = db.prepare(
+      `SELECT id, created_at, updated_at, name, parent_id
+         FROM folders
+        WHERE id = ?`,
+    );
+    this.renameFolderStmt = db.prepare(
+      'UPDATE folders SET name=?, updated_at=? WHERE id=?',
+    );
+    this.setFolderParentStmt = db.prepare(
+      'UPDATE folders SET parent_id=?, updated_at=? WHERE id=?',
+    );
+    this.deleteFolderStmt = db.prepare('DELETE FROM folders WHERE id=?');
+    this.moveNotesFromFolderStmt = db.prepare(
+      'UPDATE notes SET folder_id=?, updated_at=? WHERE folder_id=?',
+    );
+    this.moveChildFoldersStmt = db.prepare(
+      'UPDATE folders SET parent_id=?, updated_at=? WHERE parent_id=?',
     );
   }
 
@@ -244,6 +268,67 @@ export class NoteStore {
       name: input.name,
       parentId,
     };
+  }
+
+  getFolder(id: string): Folder | undefined {
+    const row = this.getFolderStmt.get(id) as FolderRow | undefined;
+    return row ? rowToFolder(row) : undefined;
+  }
+
+  renameFolder(id: string, name: string): Folder {
+    const folder = this.getFolder(id);
+    if (!folder) throw new Error('Folder not found');
+    if (folder.name === name) return folder;
+    const duplicate = this.getFolderByNameStmt.get(name, folder.parentId, folder.parentId) as
+      | FolderRow
+      | undefined;
+    if (duplicate && duplicate.id !== id) {
+      throw new Error('A folder with that name already exists in this location');
+    }
+    this.renameFolderStmt.run(name, Date.now(), id);
+    return { ...folder, name, updatedAt: Date.now() };
+  }
+
+  setFolderParent(id: string, parentId: string | null): Folder {
+    const folder = this.getFolder(id);
+    if (!folder) throw new Error('Folder not found');
+    if (parentId === id) throw new Error('A folder cannot be its own parent');
+    if (parentId && this.isDescendant(parentId, id)) {
+      throw new Error('Cannot move a folder into one of its descendants');
+    }
+    if ((folder.parentId ?? null) === (parentId ?? null)) return folder;
+    const duplicate = this.getFolderByNameStmt.get(folder.name, parentId, parentId) as
+      | FolderRow
+      | undefined;
+    if (duplicate && duplicate.id !== id) {
+      throw new Error('A folder with that name already exists in the target location');
+    }
+    this.setFolderParentStmt.run(parentId ?? null, Date.now(), id);
+    return { ...folder, parentId, updatedAt: Date.now() };
+  }
+
+  deleteFolder(id: string, notesDestination: 'parent' | 'ungrouped'): void {
+    const folder = this.getFolder(id);
+    if (!folder) return;
+    const now = Date.now();
+    const target = notesDestination === 'parent' ? folder.parentId ?? null : null;
+    this.moveNotesFromFolderStmt.run(target, now, id);
+    this.moveChildFoldersStmt.run(folder.parentId ?? null, now, id);
+    this.deleteFolderStmt.run(id);
+  }
+
+  private isDescendant(candidateId: string, ancestorId: string): boolean {
+    const seen = new Set<string>();
+    let current: string | null = candidateId;
+    while (current) {
+      if (seen.has(current)) return false;
+      seen.add(current);
+      if (current === ancestorId) return true;
+      const row = this.getFolderStmt.get(current) as FolderRow | undefined;
+      if (!row) return false;
+      current = row.parent_id;
+    }
+    return false;
   }
 }
 

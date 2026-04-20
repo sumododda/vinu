@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
-import type { Settings } from '../lib/api';
+import type { RendererSettings } from '../lib/api';
 import { BackIcon, CheckIcon } from '../components/Icons';
 import { HotkeyRecorder } from '../components/HotkeyRecorder';
 
-const PROVIDER_DEFAULTS: Record<Settings['provider'], { baseUrl: string; modelHint: string }> = {
+type EditableSettings = RendererSettings & { apiKey: string };
+
+const PROVIDER_DEFAULTS: Record<EditableSettings['provider'], { baseUrl: string; modelHint: string }> = {
   anthropic: { baseUrl: '', modelHint: 'claude-opus-4-7' },
   openrouter: { baseUrl: 'https://openrouter.ai/api/v1', modelHint: 'anthropic/claude-opus-4-7' },
   custom: { baseUrl: '', modelHint: 'e.g. llama3.2 (Ollama) or gpt-4o-mini' },
@@ -16,8 +18,8 @@ function getErrorMessage(error: unknown, fallback: string) {
 
 function nextBaseUrl(
   currentBaseUrl: string,
-  currentProvider: Settings['provider'],
-  nextProvider: Settings['provider'],
+  currentProvider: EditableSettings['provider'],
+  nextProvider: EditableSettings['provider'],
 ) {
   const currentDefault = PROVIDER_DEFAULTS[currentProvider].baseUrl;
   const nextDefault = PROVIDER_DEFAULTS[nextProvider].baseUrl;
@@ -30,7 +32,7 @@ function nextBaseUrl(
 }
 
 export function SettingsPage() {
-  const [s, setS] = useState<Settings | null>(null);
+  const [s, setS] = useState<EditableSettings | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -48,7 +50,7 @@ export function SettingsPage() {
       .get()
       .then((settings) => {
         if (cancelled) return;
-        setS(settings);
+        setS({ ...settings, apiKey: '' });
       })
       .catch((error) => {
         if (cancelled) return;
@@ -89,7 +91,7 @@ export function SettingsPage() {
 
   if (!s) return <p>Unable to load settings.</p>;
 
-  function update<K extends keyof Settings>(k: K, v: Settings[K]) {
+  function update<K extends keyof EditableSettings>(k: K, v: EditableSettings[K]) {
     setSavedAt(null);
     setSaveError(null);
     setS((prev) => (prev ? { ...prev, [k]: v } : prev));
@@ -103,6 +105,9 @@ export function SettingsPage() {
     try {
       await api.settings.set(s);
       setSavedAt(Date.now());
+      setS((prev) =>
+        prev ? { ...prev, hasApiKey: prev.hasApiKey || prev.apiKey.length > 0, apiKey: '' } : prev,
+      );
     } catch (error) {
       setSaveError(getErrorMessage(error, 'Failed to save settings'));
     } finally {
@@ -149,13 +154,13 @@ export function SettingsPage() {
             type="password"
             value={s.apiKey}
             onChange={(e) => update('apiKey', e.target.value)}
-            placeholder="sk-…"
+            placeholder={s.hasApiKey ? 'Stored securely — type to replace' : 'sk-…'}
             autoComplete="off"
             spellCheck={false}
           />
           <span className="hint">
-            Encrypted at rest via your OS keychain. Never leaves your machine
-            except directly to the provider you choose above.
+            Encrypted at rest via your OS keychain. The stored key is never read
+            back into the renderer — leave blank to keep the current key.
           </span>
         </div>
 

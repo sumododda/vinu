@@ -3,7 +3,7 @@
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Settings } from '../lib/api';
+import type { RendererSettings } from '../lib/api';
 import { SettingsPage } from './SettingsPage';
 
 const { mockApi } = vi.hoisted(() => ({
@@ -29,10 +29,10 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function makeSettings(overrides: Partial<Settings> = {}): Settings {
+function makeSettings(overrides: Partial<RendererSettings> = {}): RendererSettings {
   return {
     provider: 'anthropic',
-    apiKey: 'sk-test',
+    hasApiKey: true,
     baseUrl: '',
     model: 'claude-opus-4-7',
     hotkeyEnabled: true,
@@ -127,20 +127,20 @@ describe('SettingsPage', () => {
     });
     await flushPromises();
 
-    expect(mockApi.settings.set).toHaveBeenCalledWith(
-      makeSettings({
+    expect(mockApi.settings.set).toHaveBeenCalledWith({
+      ...makeSettings({
         provider: 'openrouter',
-        apiKey: 'sk-updated',
         baseUrl: 'https://openrouter.ai/api/v1',
       }),
-    );
+      apiKey: 'sk-updated',
+    });
     expect(container.textContent).toContain('Saved.');
   });
 
   it('renders a retryable load error when settings fail to load', async () => {
     mockApi.settings.get
       .mockRejectedValueOnce(new Error('load failed'))
-      .mockResolvedValueOnce(makeSettings({ apiKey: 'after-retry' }));
+      .mockResolvedValueOnce(makeSettings({ hasApiKey: true }));
 
     await act(async () => {
       root.render(<SettingsPage />);
@@ -156,7 +156,27 @@ describe('SettingsPage', () => {
     await flushPromises();
 
     expect(container.querySelector('[role="alert"]')).toBeNull();
-    expect(getTextInputByLabelText(container, 'API key').value).toBe('after-retry');
+    const apiKeyInput = getTextInputByLabelText(container, 'API key');
+    expect(apiKeyInput.value).toBe('');
+    expect(apiKeyInput.placeholder).toContain('Stored securely');
+  });
+
+  it('preserves the stored api key when the user does not retype it', async () => {
+    mockApi.settings.get.mockResolvedValue(makeSettings({ hasApiKey: true }));
+
+    await act(async () => {
+      root.render(<SettingsPage />);
+    });
+    await flushPromises();
+
+    await act(async () => {
+      getButton(container, 'Save changes').click();
+    });
+    await flushPromises();
+
+    const payload = mockApi.settings.set.mock.calls[0]?.[0] as { apiKey?: string } | undefined;
+    expect(payload).toBeDefined();
+    expect(payload?.apiKey ?? '').toBe('');
   });
 
   it('shows a visible save error and re-enables saving after rejection', async () => {

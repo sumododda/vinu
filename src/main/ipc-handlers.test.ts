@@ -144,4 +144,136 @@ describe('registerIpcHandlers', () => {
     });
     expect(send).toHaveBeenCalledTimes(4);
   });
+
+  it('redacts the api key from SettingsGet and signals hasApiKey', async () => {
+    const { registerIpcHandlers } = await import('./ipc-handlers');
+    const settingsRead = vi.fn().mockReturnValue({
+      provider: 'anthropic',
+      apiKey: 'sk-very-secret',
+      baseUrl: '',
+      model: 'claude-opus-4-7',
+      hotkeyEnabled: false,
+      hotkeyAccelerator: 'CommandOrControl+Shift+N',
+      keepAudioDefault: true,
+    });
+
+    registerIpcHandlers({
+      store: {} as any,
+      settings: { read: settingsRead, write: vi.fn() } as any,
+      pipeline: { process: vi.fn(), regenerate: vi.fn() } as any,
+      audioDir: '/tmp/audio',
+      windows: () => [],
+    });
+
+    const result = await ipcHandlers.get(IpcChannels.SettingsGet)!();
+    expect(result).not.toHaveProperty('apiKey');
+    expect(result).toMatchObject({ provider: 'anthropic', hasApiKey: true });
+    expect(JSON.stringify(result)).not.toContain('sk-very-secret');
+  });
+
+  it('preserves the stored api key when SettingsSet receives an empty apiKey', async () => {
+    const { registerIpcHandlers } = await import('./ipc-handlers');
+    const existing = {
+      provider: 'anthropic',
+      apiKey: 'sk-existing',
+      baseUrl: '',
+      model: 'claude-opus-4-7',
+      hotkeyEnabled: false,
+      hotkeyAccelerator: 'CommandOrControl+Shift+N',
+      keepAudioDefault: true,
+    };
+    const write = vi.fn();
+
+    registerIpcHandlers({
+      store: {} as any,
+      settings: { read: vi.fn().mockReturnValue(existing), write } as any,
+      pipeline: { process: vi.fn(), regenerate: vi.fn() } as any,
+      audioDir: '/tmp/audio',
+      windows: () => [],
+    });
+
+    await ipcHandlers.get(IpcChannels.SettingsSet)!(
+      {},
+      {
+        provider: 'anthropic',
+        apiKey: '',
+        baseUrl: '',
+        model: 'claude-opus-4-7',
+        hotkeyEnabled: false,
+        hotkeyAccelerator: 'CommandOrControl+Shift+N',
+        keepAudioDefault: true,
+      },
+    );
+
+    expect(write).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'sk-existing' }));
+  });
+
+  it('rejects baseUrl pointing at localhost or file://', async () => {
+    const { registerIpcHandlers } = await import('./ipc-handlers');
+    const existing = {
+      provider: 'anthropic',
+      apiKey: 'sk-existing',
+      baseUrl: '',
+      model: 'claude-opus-4-7',
+      hotkeyEnabled: false,
+      hotkeyAccelerator: 'CommandOrControl+Shift+N',
+      keepAudioDefault: true,
+    };
+
+    registerIpcHandlers({
+      store: {} as any,
+      settings: { read: vi.fn().mockReturnValue(existing), write: vi.fn() } as any,
+      pipeline: { process: vi.fn(), regenerate: vi.fn() } as any,
+      audioDir: '/tmp/audio',
+      windows: () => [],
+    });
+
+    const base = {
+      provider: 'custom',
+      apiKey: 'sk-x',
+      model: 'local',
+      hotkeyEnabled: false,
+      hotkeyAccelerator: 'CommandOrControl+Shift+N',
+      keepAudioDefault: true,
+    };
+    const handler = ipcHandlers.get(IpcChannels.SettingsSet)!;
+
+    expect(() => handler({}, { ...base, baseUrl: 'http://localhost:8080' })).toThrow(/localhost/);
+    expect(() => handler({}, { ...base, baseUrl: 'http://127.0.0.1:1' })).toThrow(/localhost/);
+    expect(() => handler({}, { ...base, baseUrl: 'file:///etc/passwd' })).toThrow(/http:/);
+    expect(() => handler({}, { ...base, baseUrl: 'http://192.168.1.5' })).toThrow(/private/);
+  });
+
+  it('requires custom provider to have a baseUrl', async () => {
+    const { registerIpcHandlers } = await import('./ipc-handlers');
+    const existing = {
+      provider: 'anthropic',
+      apiKey: 'sk-existing',
+      baseUrl: '',
+      model: 'claude-opus-4-7',
+      hotkeyEnabled: false,
+      hotkeyAccelerator: 'CommandOrControl+Shift+N',
+      keepAudioDefault: true,
+    };
+
+    registerIpcHandlers({
+      store: {} as any,
+      settings: { read: vi.fn().mockReturnValue(existing), write: vi.fn() } as any,
+      pipeline: { process: vi.fn(), regenerate: vi.fn() } as any,
+      audioDir: '/tmp/audio',
+      windows: () => [],
+    });
+
+    expect(() =>
+      ipcHandlers.get(IpcChannels.SettingsSet)!({}, {
+        provider: 'custom',
+        apiKey: 'sk-x',
+        baseUrl: '',
+        model: 'local',
+        hotkeyEnabled: false,
+        hotkeyAccelerator: 'CommandOrControl+Shift+N',
+        keepAudioDefault: true,
+      }),
+    ).toThrow(/custom provider requires/);
+  });
 });

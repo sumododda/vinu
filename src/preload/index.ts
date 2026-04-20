@@ -24,6 +24,11 @@ const api: Api = {
   folders: {
     list: () => ipcRenderer.invoke(IpcChannels.FoldersList),
     create: (name, parentId) => ipcRenderer.invoke(IpcChannels.FoldersCreate, { name, parentId }),
+    rename: (id, name) => ipcRenderer.invoke(IpcChannels.FoldersRename, { id, name }),
+    delete: (id, notesDestination) =>
+      ipcRenderer.invoke(IpcChannels.FoldersDelete, { id, notesDestination }),
+    setParent: (id, parentId) =>
+      ipcRenderer.invoke(IpcChannels.FoldersSetParent, { id, parentId }),
   },
   settings: {
     get: () => ipcRenderer.invoke(IpcChannels.SettingsGet),

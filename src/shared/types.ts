@@ -49,3 +49,7 @@ export interface Settings {
   hotkeyAccelerator: string;
   keepAudioDefault: boolean;
 }
+
+export interface RendererSettings extends Omit<Settings, 'apiKey'> {
+  hasApiKey: boolean;
+}

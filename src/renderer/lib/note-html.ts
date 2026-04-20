@@ -8,7 +8,7 @@ const MARKED_OPTIONS = { gfm: true, breaks: true } as const;
 const BLOCK_HIGHLIGHT_RE =
   /:::highlight (yellow|green|blue|pink)\r?\n([\s\S]+?)\r?\n:::/g;
 const INLINE_HIGHLIGHT_RE = /==(yellow|green|blue|pink)::([\s\S]+?)==/g;
-const SAFE_DATA_IMAGE_RE = /^data:image\/(?:png|jpeg|jpg|gif|webp|avif|bmp);/i;
+const SAFE_DATA_IMAGE_RE = /^data:image\/(?:png|jpeg|jpg|gif|webp|avif|bmp);base64,[A-Za-z0-9+/=]+$/i;
 
 interface HighlightToken {
   key: string;

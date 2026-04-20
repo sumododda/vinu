@@ -197,7 +197,16 @@ describe('DetailPage', () => {
     });
     await flushPromises();
 
+    expect(container.querySelector('.transcript-editor')).toBeNull();
+
+    await act(async () => {
+      (container.querySelector('.transcript-toggle') as HTMLButtonElement).click();
+    });
+    await flushPromises();
+
     const transcriptEditor = container.querySelector('.transcript-editor') as HTMLTextAreaElement;
+    expect(transcriptEditor).not.toBeNull();
+
     await act(async () => {
       setTextareaValue(transcriptEditor, 'Corrected transcript');
     });
