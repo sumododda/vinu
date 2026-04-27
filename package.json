@@ -33,7 +33,7 @@
     "e2e": "playwright test"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.90.0",
+    "@anthropic-ai/sdk": "^0.91.1",
     "@fontsource-variable/public-sans": "^5.2.7",
     "@fontsource/libre-bodoni": "^5.2.7",
     "better-sqlite3": "^12.9.0",
